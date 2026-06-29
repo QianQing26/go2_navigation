@@ -55,5 +55,7 @@ python training/legged_gym/legged_gym/scripts/play.py
 
 ---
 
-## Deployment (Coming soon)
-For instructions on deploying to real-world robots, please refer to the [deployment README](deployment/README.md).
+## Deployment
+For instructions on deploying to real-world robots, see the deployment guide:
+- [deployment/README_en.md](deployment/README_en.md) — English
+- [deployment/README_zh.md](deployment/README_zh.md) — 中文
