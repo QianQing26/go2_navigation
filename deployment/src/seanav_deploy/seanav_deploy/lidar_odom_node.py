@@ -7,8 +7,11 @@ can be expressed relative to where the robot started).
 
 The robot must stay still until the ``origin fixed`` log line appears; before
 that BreezySLAM is still converging. Mounting orientation and axis signs are
-corrected with ``laser_yaw_offset_rad`` and ``pose_x_sign / pose_y_sign /
+corrected with ``LidarCfg.yaw_offset_rad`` and ``PoseCfg.x_sign / y_sign /
 yaw_sign`` so that the published pose matches the ``/rays`` frame.
+
+Defaults come from :mod:`seanav_deploy.config`; every value can still be
+overridden per-run with ``--ros-args -p name:=value`` for debugging.
 """
 
 import math
@@ -22,50 +25,52 @@ from geometry_msgs.msg import Pose2D
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 
+from seanav_deploy.config import LidarCfg, PoseCfg
+
 
 def wrap_pi(angle):
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
-class BreezyLidarOdomNode(Node):
+class LidarOdomNode(Node):
     def __init__(self):
-        super().__init__("breezy_lidar_odom_node")
+        super().__init__("lidar_odom")
 
-        self.declare_parameter("input_topic", "/scan")
-        self.declare_parameter("output_topic", "/pose")
-        self.declare_parameter("map_size_pixels", 800)
-        self.declare_parameter("map_size_meters", 20.0)
-        self.declare_parameter("distance_no_detection_m", 4.0)
-        self.declare_parameter("breezy_scan_size", 360)
-        self.declare_parameter("scan_rate_hz", 10.0)
-        self.declare_parameter("scan_qos_depth", 1)
-        self.declare_parameter("min_valid_bins", 90)
-        self.declare_parameter("skip_first_scans", 3)
-        self.declare_parameter("origin_settle_scans", 30)
-        self.declare_parameter("use_previous_on_bad_scan", True)
-        self.declare_parameter("map_quality", 50)
-        self.declare_parameter("hole_width_mm", 600)
-        self.declare_parameter("random_seed", 0)
-        self.declare_parameter("sigma_xy_mm", 20)
-        self.declare_parameter("sigma_theta_degrees", 3)
-        self.declare_parameter("max_search_iter", 500)
-        self.declare_parameter("debug_log_hz", 1.0)
-        self.declare_parameter("laser_yaw_offset_rad", 0.0)
-        self.declare_parameter("laser_x_in_base_m", 0.0)
-        self.declare_parameter("laser_y_in_base_m", 0.0)
-        self.declare_parameter("pose_x_sign", 1.0)
-        self.declare_parameter("pose_y_sign", -1.0)
-        self.declare_parameter("yaw_sign", 1.0)
+        self.declare_parameter("input_topic", PoseCfg.input_topic)
+        self.declare_parameter("output_topic", PoseCfg.output_topic)
+        self.declare_parameter("map_size_pixels", int(PoseCfg.map_size_pixels))
+        self.declare_parameter("map_size_meters", float(PoseCfg.map_size_meters))
+        self.declare_parameter("distance_no_detection_m", float(PoseCfg.distance_no_detection_m))
+        self.declare_parameter("breezy_scan_size", int(PoseCfg.breezy_scan_size))
+        self.declare_parameter("scan_rate_hz", float(PoseCfg.scan_rate_hz))
+        self.declare_parameter("scan_qos_depth", int(PoseCfg.scan_qos_depth))
+        self.declare_parameter("min_valid_bins", int(PoseCfg.min_valid_bins))
+        self.declare_parameter("skip_first_scans", int(PoseCfg.skip_first_scans))
+        self.declare_parameter("origin_settle_scans", int(PoseCfg.origin_settle_scans))
+        self.declare_parameter("use_previous_on_bad_scan", bool(PoseCfg.use_previous_on_bad_scan))
+        self.declare_parameter("map_quality", int(PoseCfg.map_quality))
+        self.declare_parameter("hole_width_mm", int(PoseCfg.hole_width_mm))
+        self.declare_parameter("random_seed", int(PoseCfg.random_seed))
+        self.declare_parameter("sigma_xy_mm", int(PoseCfg.sigma_xy_mm))
+        self.declare_parameter("sigma_theta_degrees", int(PoseCfg.sigma_theta_degrees))
+        self.declare_parameter("max_search_iter", int(PoseCfg.max_search_iter))
+        self.declare_parameter("debug_log_hz", float(PoseCfg.debug_log_hz))
+        self.declare_parameter("laser_yaw_offset_rad", float(LidarCfg.yaw_offset_rad))
+        self.declare_parameter("laser_x_in_base_m", float(LidarCfg.x_in_base_m))
+        self.declare_parameter("laser_y_in_base_m", float(LidarCfg.y_in_base_m))
+        self.declare_parameter("pose_x_sign", float(PoseCfg.x_sign))
+        self.declare_parameter("pose_y_sign", float(PoseCfg.y_sign))
+        self.declare_parameter("yaw_sign", float(PoseCfg.yaw_sign))
         # Constant-velocity motion prior: without odometry, RMHC_SLAM searches
         # around the previous pose only, so it systematically lags fast forward
         # motion (the +X / heading direction). Feeding a predicted pose_change
         # moves the search start to where the robot is expected to be, which lets
         # a small sigma stay stable while still tracking motion.
-        self.declare_parameter("use_motion_prior", True)
-        self.declare_parameter("motion_prior_alpha", 0.5)
-        self.declare_parameter("motion_prior_max_fwd_mm", 80.0)
-        self.declare_parameter("motion_prior_max_dtheta_deg", 15.0)
-        self.declare_parameter("motion_prior_max_dt_s", 0.5)
+        self.declare_parameter("use_motion_prior", bool(PoseCfg.use_motion_prior))
+        self.declare_parameter("motion_prior_alpha", float(PoseCfg.motion_prior_alpha))
+        self.declare_parameter("motion_prior_max_fwd_mm", float(PoseCfg.motion_prior_max_fwd_mm))
+        self.declare_parameter("motion_prior_max_dtheta_deg", float(PoseCfg.motion_prior_max_dtheta_deg))
+        self.declare_parameter("motion_prior_max_dt_s", float(PoseCfg.motion_prior_max_dt_s))
 
         self.input_topic = self.get_parameter("input_topic").value
         self.output_topic = self.get_parameter("output_topic").value
@@ -121,7 +126,7 @@ class BreezyLidarOdomNode(Node):
         self.sub = self.create_subscription(LaserScan, self.input_topic, self.callback, self.scan_qos_depth)
 
         self.get_logger().info(
-            f"breezy_lidar_odom: {self.input_topic} -> {self.output_topic}, "
+            f"lidar_odom: {self.input_topic} -> {self.output_topic}, "
             f"scan_size={self.breezy_scan_size}, scan_rate={self.scan_rate_hz:.1f} Hz, "
             f"min_valid_bins={self.min_valid_bins}, "
             f"laser_yaw_offset={self.laser_yaw_offset:.3f}, "
@@ -141,9 +146,10 @@ class BreezyLidarOdomNode(Node):
 
     def _init_slam(self, msg):
         # A2M12 with angle_compensate can publish more than 360 ROS samples per
-        # revolution. BreezySLAM's C extension is happiest when the scan length
-        # exactly matches the Laser model, so bin raw /scan into fixed 1-degree
-        # distances and call update(scan_mm) without scan_angles_degrees.
+        # revolution, while BreezySLAM's C extension expects the scan length to
+        # match the Laser model exactly. Raw /scan is therefore binned into
+        # fixed 1-degree distances and update(scan_mm) is called without
+        # scan_angles_degrees.
         laser = Laser(self.breezy_scan_size, self.scan_rate_hz, 360, self.no_detection_mm)
         self.slam = RMHC_SLAM(
             laser,
@@ -305,7 +311,7 @@ class BreezyLidarOdomNode(Node):
 
 def main():
     rclpy.init()
-    node = BreezyLidarOdomNode()
+    node = LidarOdomNode()
     try:
         rclpy.spin(node)
     finally:

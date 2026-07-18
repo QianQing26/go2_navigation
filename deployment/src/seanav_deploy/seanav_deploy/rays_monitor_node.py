@@ -1,11 +1,11 @@
 """Live ASCII monitor for ``/rays``.
 
-Prints the 41-ray scan as a one-line bar plus a few sampled distances so you can
-sanity-check the lidar mounting direction (index 0 = -120 deg right, index 20 =
-straight ahead, index 40 = +120 deg left) and watch the nearest obstacle while
-walking objects around the robot.
+Prints the 41-ray scan as a one-line bar plus a few sampled distances to verify
+the lidar mounting direction (index 0 = -120 deg right, index 20 = straight
+ahead, index 40 = +120 deg left) and to track the nearest obstacle while test
+obstacles are moved around the robot.
 
-Read-only: it never publishes, so it is safe to leave running during a deploy.
+Read-only: it never publishes, so it is safe to keep running during deployment.
 """
 
 import math
@@ -15,14 +15,16 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 
+from seanav_deploy.config import MonitorCfg
+
 
 class RaysMonitorNode(Node):
     def __init__(self):
-        super().__init__("rays_monitor_node")
+        super().__init__("rays_monitor")
 
-        self.declare_parameter("topic", "/rays")
-        self.declare_parameter("print_hz", 5.0)
-        self.declare_parameter("warn_distance", 0.6)
+        self.declare_parameter("topic", MonitorCfg.topic)
+        self.declare_parameter("print_hz", float(MonitorCfg.print_hz))
+        self.declare_parameter("warn_distance", float(MonitorCfg.warn_distance))
 
         self.topic = self.get_parameter("topic").value
         self.print_period = 1.0 / float(self.get_parameter("print_hz").value)

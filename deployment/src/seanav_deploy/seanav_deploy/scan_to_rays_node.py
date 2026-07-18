@@ -1,14 +1,17 @@
-"""Convert a raw 360-degree ``/scan`` into the 41-ray ``/rays`` that the
-SEA-Nav navigation policy expects.
+"""Convert the raw 360-degree ``/scan`` into the 41-ray ``/rays`` that the
+SEA-Nav navigation policy consumes.
 
 The node down-samples the lidar into 41 rays spanning [-120, +120] deg in the
 robot ``base_link`` frame (the same contract the simulator publishes). Mounting
-orientation is corrected with ``laser_yaw_offset_rad`` / ``invert_angle`` so that
-``ranges[20]`` always points straight ahead.
+orientation is corrected with ``LidarCfg.yaw_offset_rad`` / ``RaysCfg.invert_angle``
+so that ``ranges[20]`` always points straight ahead.
 
-Nothing about the policy lives here: distances are exposed in meters and clipped
-to ``[range_min, range_max]``; the ``log2`` encoding is applied later inside the
-Nav agent so the input distribution matches training.
+No policy-specific encoding happens here: distances are published in meters and
+clipped to ``[range_min, range_max]``; the ``log2`` encoding is applied later
+inside the Nav agent so the input distribution matches training.
+
+Defaults come from :mod:`seanav_deploy.config`; every value can still be
+overridden per-run with ``--ros-args -p name:=value`` for debugging.
 """
 
 import math
@@ -18,6 +21,8 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 
+from seanav_deploy.config import LidarCfg, RaysCfg
+
 
 def wrap_pi(angle):
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
@@ -25,16 +30,16 @@ def wrap_pi(angle):
 
 class ScanToRaysNode(Node):
     def __init__(self):
-        super().__init__("scan_to_rays_node")
+        super().__init__("scan_to_rays")
 
-        self.declare_parameter("input_topic", "/scan")
-        self.declare_parameter("output_topic", "/rays")
-        self.declare_parameter("output_frame", "base_link")
-        self.declare_parameter("laser_yaw_offset_rad", 0.0)
-        self.declare_parameter("invert_angle", False)
-        self.declare_parameter("range_min", 0.1)
-        self.declare_parameter("range_max", 3.0)
-        self.declare_parameter("bin_width_deg", 6.0)
+        self.declare_parameter("input_topic", RaysCfg.input_topic)
+        self.declare_parameter("output_topic", RaysCfg.output_topic)
+        self.declare_parameter("output_frame", RaysCfg.output_frame)
+        self.declare_parameter("laser_yaw_offset_rad", float(LidarCfg.yaw_offset_rad))
+        self.declare_parameter("invert_angle", bool(RaysCfg.invert_angle))
+        self.declare_parameter("range_min", float(RaysCfg.range_min))
+        self.declare_parameter("range_max", float(RaysCfg.range_max))
+        self.declare_parameter("bin_width_deg", float(RaysCfg.bin_width_deg))
 
         self.input_topic = self.get_parameter("input_topic").value
         self.output_topic = self.get_parameter("output_topic").value
@@ -45,7 +50,7 @@ class ScanToRaysNode(Node):
         self.range_max = float(self.get_parameter("range_max").value)
         self.bin_width = math.radians(float(self.get_parameter("bin_width_deg").value))
 
-        # SEA-Nav paper / Sim2Sim contract: 41 rays over [-120, +120] deg.
+        # SEA-Nav Sim2Sim contract: 41 rays over [-120, +120] deg.
         self.target_angles = np.linspace(-2.0 * math.pi / 3.0, 2.0 * math.pi / 3.0, 41)
 
         self.pub = self.create_publisher(LaserScan, self.output_topic, 10)
