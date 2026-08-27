@@ -1,6 +1,6 @@
 # SEA-Nav Real-Robot Deployment (Unitree Go2)
 
-Colcon workspace for running SEA-Nav on a real Unitree Go2. It publishes the two topics the control stack consumes — `/rays` (lidar beams) and `/pose` (lidar odometry) — and launches the [quad_deploy](https://github.com/11chens/quad_deploy) control stack (Nav + Loco + safe-stop FSM) unmodified.
+Colcon workspace for running SEA-Nav on a real Unitree Go2. It publishes the two topics the control stack consumes — `/rays` (lidar beams) and `/pose` (lidar odometry) — and launches the [quad_deploy](https://github.com/11chens/quad_deploy) control stack (Nav + Loco + safe-stop FSM).
 
 Hardware: RPLIDAR A2M12 (USB serial). Odometry: [BreezySLAM](https://github.com/simondlevy/BreezySLAM).
 
@@ -11,7 +11,7 @@ Hardware: RPLIDAR A2M12 (USB serial). Odometry: [BreezySLAM](https://github.com/
 | `sllidar_node` | `sllidar_ros2` | lidar serial port | `/scan` (360°, ~10 Hz) |
 | `scan_to_rays` | this package | `/scan` | `/rays` (41 beams, `base_link` frame, ±120°, [0.1, 3.0] m) |
 | `lidar_odom` | this package | `/scan` | `/pose` (world-frame `x, y, θ`, origin at startup pose) |
-| `rays_monitor` | this package | `/rays` | terminal visualization (read-only) |
+| `rays_monitor` | this package | `/rays` | terminal visualization |
 | `controller` | this package → `quad_deploy` | `/rays`, `/pose` | Go2 `rt/lowcmd` |
 
 The `controller` waits until `/rays` and `/pose` are streaming (perception handshake), then starts `quad_deploy.scripts.sea.sea_run_sdk`. Both topics follow the specification in `SEANavAgentCfg`.
@@ -89,18 +89,21 @@ python launch/deploy_launch.py --enable CONTROL_REAL --disable CONTROL_DRY
 ## Gamepad Controls
 
 ```text
-cold_start ─(stand complete + X)─► human_teleop ─(R1, perception fresh)─► navigation
-                                       ▲                                      │
-                                  R2 takeover                    perception stale > 1 s
-                                       └──────────── safe_stop ◄──────────────┘
+cold_start ─(stand complete + X)─► human_teleop ─(R1 + fresh perception)─► navigation
+navigation ─(perception stale > 1 s)─► safe_stop
+navigation ─(R2 immediate)───────────► human_teleop
+safe_stop ─(R2 immediate)────────────► human_teleop
+safe_stop ─(fresh perception + R1)───► navigation
 any state ─L2─► emergency ─L1─► recovery ─(stand complete + X)─► human_teleop
 ```
+
+`R2` is a high-priority manual takeover: pressing it in `navigation` or `safe_stop` immediately enters `human_teleop`, independently of perception freshness or the safe-stop timeout.
 
 | Button | Action |
 | --- | --- |
 | `X` | enter `human_teleop` after standing completes |
 | `R1` | `human_teleop` → `navigation` (requires fresh `/rays` and `/pose`) |
-| `R2` | `navigation` / `safe_stop` → manual takeover |
+| `R2` | immediate `navigation` / `safe_stop` → `human_teleop` takeover |
 | `L2` | any state → `emergency` (motors off) |
 | `L1` | `emergency` → `recovery` |
 
