@@ -1,0 +1,37 @@
+# Node orchestration configuration for the SEA-Nav real-robot deployment
+# (same launcher as quad_deploy: ros_base BaseLauncher, one tmux pane per node).
+#
+# Quick start:
+#   python launch/deploy_launch.py            # perception + monitor + controller (dry-run)
+#   tmux attach -t seanav_deploy
+#
+# Enable motors (only after the checks in README pass):
+#   python launch/deploy_launch.py --enable CONTROL_REAL --disable CONTROL_DRY
+#
+# Every pane sources env.sh itself, which provides conda + ROS2 + CycloneDDS +
+# this workspace's overlay; the env block below is therefore minimal.
+# CONTROL_* performs a perception handshake and starts the control stack only
+# after /rays and /pose are streaming.
+
+sessions:
+  - env:
+      session_name: "seanav_deploy"
+      workspace_root: "~/Projects"
+
+    nodes:
+      - name: "PERCEPTION"
+        project: "SEA-Nav-Code/deployment"
+        command: "bash -c 'source env.sh && ros2 launch seanav_deploy perception.launch.py'"
+
+      - name: "RAYS_MONITOR"
+        project: "SEA-Nav-Code/deployment"
+        command: "bash -c 'source env.sh && ros2 run seanav_deploy rays_monitor'"
+
+      - name: "CONTROL_DRY"
+        project: "SEA-Nav-Code/deployment"
+        command: "bash -c 'source env.sh && ros2 run seanav_deploy controller'"
+
+      - name: "CONTROL_REAL"
+        project: "SEA-Nav-Code/deployment"
+        command: "bash -c 'source env.sh && ros2 run seanav_deploy controller --run'"
+        autostart: false

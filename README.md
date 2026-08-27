@@ -55,5 +55,5 @@ python training/legged_gym/legged_gym/scripts/play.py
 
 ---
 
-## Deployment (Coming soon)
-For instructions on deploying to real-world robots, please refer to the [deployment README](deployment/README.md).
+## Deployment
+For real-robot deployment on the Unitree Go2, see the [deployment README](deployment/README.md).
