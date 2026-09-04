@@ -34,6 +34,22 @@ import numpy as np
 
 
 class Go2PosRoughCfg( LeggedRobotPosCfg ):
+    class controller(LeggedRobotPosCfg.controller):
+        # RoboGauge's exported go2_moe_cts policy. It is a stateful
+        # batchable TorchScript module with a five-step internal history.
+        name = 'robogauge'
+        model_path = '{LEGGED_GYM_ROOT_DIR}/legged_gym/ctrl_model/go2_moe_cts_137000_0.6365_batchable.pt'
+        obs_dim = 45
+        history_length = 5
+        obs_scale_ang_vel = 0.25
+        obs_scale_dof_pos = 1.0
+        obs_scale_dof_vel = 0.05
+        command_scale = [2.0, 2.0, 0.25]
+        # Match go2_rl_gym's training observation noise.
+        add_noise = True
+        noise_level = 1.0
+        noise_scales = [0.2, 0.05, 0.01, 1.5]
+
     class loco:
         num_obs_buf = 45
         his_len = 10
@@ -130,8 +146,9 @@ class Go2PosRoughCfg( LeggedRobotPosCfg ):
     class control( LeggedRobotPosCfg.control ):
         # PD Drive parameters:
         control_type = 'P'
-        stiffness = {'joint': 30.}  # [N*m/rad]
-        damping = {'joint': 0.75}     # [N*m*s/rad
+        # Match the gains used to train the RoboGauge Go2 policy.
+        stiffness = {'joint': 20.}  # [N*m/rad]
+        damping = {'joint': 0.5}     # [N*m*s/rad
             
         action_scale = 0.25
         # decimation: Number of control action updates @ sim DT per policy DT

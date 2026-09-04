@@ -53,6 +53,26 @@ To visualize and test a trained policy:
 python training/legged_gym/legged_gym/scripts/play.py
 ```
 
+### Low-level controller selection
+The navigation task uses a pluggable joint-position controller. Go2 uses the
+registered `robogauge` controller by default; the original three-model
+TorchScript controller remains available. Select a registered backend in
+`LeggedRobotPosCfg.controller.name` without changing the PPO runner or
+navigation policy:
+
+```python
+class controller:
+    name = 'torchscript'  # or 'onnx', 'robogauge'
+```
+
+Controller-owned observation construction, model inference and history reset
+are implemented under `training/legged_gym/legged_gym/controllers/`. The
+`robogauge` controller loads the configured batchable `go2_moe_cts` TorchScript
+policy, builds its 45-D source observation, and lets the policy maintain its
+five-step history. The ONNX backend is optional and requires `onnxruntime`;
+by default it looks for the `.onnx` counterparts of the existing controller
+model files.
+
 ---
 
 ## Deployment

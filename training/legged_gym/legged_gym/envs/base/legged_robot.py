@@ -85,7 +85,7 @@ class LeggedRobot(BaseTask):
 
     def reindex(self,tensor):
         #sim2real purpose
-        return tensor[:,[3,4,5,0,1,2,9,10,11,6,7,8]]
+        return tensor.index_select(1, self.joint_reindex)
 
     def step(self, actions):
         """ Apply actions, simulate, call self.post_physics_step()

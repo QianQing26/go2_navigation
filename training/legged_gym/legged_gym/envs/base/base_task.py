@@ -64,6 +64,14 @@ class BaseTask():
         self.num_actions = cfg.env.num_actions
         self.num_nav_actions = cfg.env.num_nav_actions
 
+        # Controller/model joint order -> Isaac Gym joint order.  The same
+        # mapping is used for low-level observations and final actions.
+        self.joint_reindex = torch.tensor(
+            [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8],
+            dtype=torch.long,
+            device=self.device,
+        )
+
         # optimization flags for pytorch JIT
         torch._C._jit_set_profiling_mode(False)
         torch._C._jit_set_profiling_executor(False)

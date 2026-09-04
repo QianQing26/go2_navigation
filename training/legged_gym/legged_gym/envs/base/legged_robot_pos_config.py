@@ -32,6 +32,17 @@ from .base_config import BaseConfig
 from .legged_robot_config import LeggedRobotCfg
 
 class LeggedRobotPosCfg(LeggedRobotCfg):
+    class controller:
+        # Select the low-level joint-position controller without changing the
+        # navigation task or PPO runner. Built-ins: torchscript, onnx,
+        # robogauge.
+        name = 'torchscript'
+        model_path = None
+        model_dir = None
+        encoder_vel_model = 'encoder_vel.jit'
+        encoder_latent_model = 'encoder_latent.jit'
+        body_model = 'body_latest.jit'
+
     class env(LeggedRobotCfg.env):
         num_envs = 4096
         num_cmds = 3

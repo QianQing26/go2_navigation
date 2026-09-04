@@ -45,6 +45,7 @@ from legged_gym.utils.grid2ray import *
 from .legged_robot_pos_config import LeggedRobotPosCfg
 from legged_gym.envs.go2.go2_pos_config import Go2PosRoughCfg
 from legged_gym.utils.custom_terrain import *
+from legged_gym.controllers import ControllerState, make_controller
 import torch.nn.functional as F
 
 SAVE_IMG = False
@@ -60,16 +61,21 @@ class LeggedRobotPos(LeggedRobot):
         # Additionally initialize timer_left
         self.obs_history_buf = torch.zeros(
                 self.num_envs, self.cfg.env.his_len, self.cfg.env.num_obs_one_step, device=self.device, dtype=torch.float)  
-        self.slr_obs_buf = torch.zeros(
-                self.num_envs, self.cfg.loco.num_obs_buf, device=self.device, dtype=torch.float)
-        self.slr_obs_hist = torch.zeros(
-                self.num_envs, self.cfg.loco.his_len, self.cfg.loco.num_obs_buf, device=self.device, dtype=torch.float)   
-        self.base_lin_vel_pred = torch.zeros(
-            self.num_envs, 3, device=self.device, dtype=torch.float)  
         self.actions_orig = self.actions.clone()
 
         # Replay and Collision History Init
         self._init_replay_buffers()
+
+        controller_name = self.cfg.controller.name
+        self.controller = make_controller(
+            name=controller_name,
+            controller_cfg=self.cfg.controller,
+            env_cfg=self.cfg,
+            num_envs=self.num_envs,
+            num_actions=self.num_actions,
+            device=self.device,
+            joint_reindex=self.joint_reindex,
+        )
         
         self.pos_hist = torch.zeros(
                 self.num_envs, self.cfg.env.his_len, 2, device=self.device, dtype=torch.float)
@@ -130,10 +136,6 @@ class LeggedRobotPos(LeggedRobot):
         self.collision_pos_hist = torch.zeros(self.num_envs, max_col_pts, 3, device=self.device, dtype=torch.float)
         self.num_collisions = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         
-        self.slr_body = torch.jit.load(f"{LEGGED_GYM_ROOT_DIR}/legged_gym/ctrl_model/body_latest.jit")
-        self.slr_encoder_vel = torch.jit.load(f"{LEGGED_GYM_ROOT_DIR}/legged_gym/ctrl_model/encoder_vel.jit")
-        self.slr_encoder_latent = torch.jit.load(f"{LEGGED_GYM_ROOT_DIR}/legged_gym/ctrl_model/encoder_latent.jit")
-
     def _update_replay_buffer(self):
         # Update replay buffer
         self.replay_root_states = torch.where(
@@ -179,54 +181,20 @@ class LeggedRobotPos(LeggedRobot):
         return torch.clip(torques, -self.torque_limits, self.torque_limits)
 
     def _compute_actions(self, nav_actions=None):
+        # Keep the filtered command available for the navigation observation
+        # builder, preserving the original environment behavior.
         self.slr_commands = nav_actions
-        
-        scale_lin_vel = self.cfg.loco.normalization.obs_scales.lin_vel
-        scale_ang_vel = self.cfg.loco.normalization.obs_scales.ang_vel
-        scale_dof_pos = self.cfg.loco.normalization.obs_scales.dof_pos
-        scale_dof_vel = self.cfg.loco.normalization.obs_scales.dof_vel
-        
-        self.slr_commands_scale = torch.tensor([scale_lin_vel, scale_lin_vel, scale_ang_vel], device=self.device, requires_grad=False,)
-        self.slr_obs_buf =torch.cat((
-                self.base_ang_vel * scale_ang_vel, # 3
-                self.projected_gravity, # 3
-                self.slr_commands[:, :3] * self.slr_commands_scale,
-                self.reindex((self.dof_pos - self.default_dof_pos) * scale_dof_pos),
-                self.reindex(self.dof_vel * scale_dof_vel),
-                self.actions_orig),dim=-1)
-        
-        noise_scales = self.cfg.noise.noise_scales
-        noise_vec = torch.cat((torch.ones(3) * noise_scales.ang_vel,
-                                torch.ones(3) * noise_scales.gravity,
-                                torch.zeros(3),
-                                torch.ones(
-                                12) * noise_scales.dof_pos * self.obs_scales.dof_pos,
-                                torch.ones(
-                                12) * noise_scales.dof_vel * self.obs_scales.dof_vel,
-                                torch.zeros(self.num_actions),
-                    ), dim=0)
-        
-        if self.cfg.noise.add_noise:
-            self.slr_obs_buf += (2 * torch.rand_like(self.slr_obs_buf) - 1) * 0.5 * \
-                noise_vec.to(self.device)
-        
-        self.slr_obs_hist = torch.where(
-            (self.episode_length_buf <= 1)[:, None, None],
-            torch.stack([self.slr_obs_buf] * self.cfg.env.his_len, dim=1),
-            torch.cat([
-                self.slr_obs_hist[:, 1:],
-                self.slr_obs_buf.unsqueeze(1)
-            ], dim=1)
-        )  
-        prop = self.slr_obs_buf
-        ang_vel = self.base_ang_vel[:, 2:] * scale_ang_vel
-        self.base_lin_vel_pred = self.slr_encoder_vel(self.slr_obs_hist.view(self.num_envs, -1))
-        latent = self.slr_encoder_latent(self.slr_obs_hist.view(self.num_envs, -1))
-        actor_obs = torch.cat(
-            (self.base_lin_vel_pred, prop, ang_vel, latent), dim=-1)
-        actions = self.slr_body(actor_obs)
-        
-        return actions
+        state = ControllerState(
+            base_ang_vel=self.base_ang_vel,
+            projected_gravity=self.projected_gravity,
+            nav_command=nav_actions,
+            dof_pos=self.dof_pos,
+            dof_vel=self.dof_vel,
+            default_dof_pos=self.default_dof_pos,
+            previous_action=self.actions_orig,
+            episode_length=self.episode_length_buf,
+        )
+        return self.controller.get_action(state)
 
     def post_process_actions(self):
         """ Filter and clip navigation actions to prevent sim instability. """
@@ -388,7 +356,6 @@ class LeggedRobotPos(LeggedRobot):
         self.feet_air_time[env_ids] = 0.
         self.episode_length_buf[env_ids] = 0
         self.obs_history_buf[env_ids, :, :] = 0.
-        self.slr_obs_hist[env_ids, :, :] = 0.
         self.rays_hist[env_ids, :, :] = 5.
         self.pos_hist[env_ids, :, :] = 0.
         self.goal_hist[env_ids, :, :] = 0.
@@ -400,6 +367,7 @@ class LeggedRobotPos(LeggedRobot):
         self.stay_timer[env_ids] = 0
         self.reach_goal[env_ids] = 0
         self.nav_actions_filtered[env_ids] = 0.
+        self.controller.reset(env_ids)
         
         self.contact_filt[env_ids] = False
         self.last_contacts[env_ids] = False
