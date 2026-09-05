@@ -48,9 +48,13 @@ def print_config():
     return config
 
 def train(args):
+    print('[train] loading reward configuration', flush=True)
     config = print_config()
+    print('[train] creating environment', flush=True)
     env, env_cfg = task_registry.make_env(name=args.task, args=args)
+    print('[train] creating PPO runner', flush=True)
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args)
+    print('[train] starting learning: max_iterations={}'.format(train_cfg.runner.max_iterations), flush=True)
     ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True, config=config)
     
 if __name__ == '__main__':

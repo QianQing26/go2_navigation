@@ -94,11 +94,18 @@ class TaskRegistry():
         # parse sim params (convert to dict first)
         sim_params = {"sim": class_to_dict(env_cfg.sim)}
         sim_params = parse_sim_params(args, sim_params)
+        print(
+            "[task_registry] creating environment: task={}, num_envs={}, sim_device={}, rl_device={}".format(
+                name, env_cfg.env.num_envs, args.sim_device, args.rl_device
+            ),
+            flush=True,
+        )
         env = task_class(   cfg=env_cfg,
                             sim_params=sim_params,
                             physics_engine=args.physics_engine,
                             sim_device=args.sim_device,
                             headless=args.headless)
+        print("[task_registry] environment created: task={}".format(name), flush=True)
         return env, env_cfg
 
     def make_alg_runner(self, env, name=None, args=None, train_cfg=None, log_root="default"
@@ -153,9 +160,34 @@ class TaskRegistry():
 
         runner_class = eval(train_cfg.runner_class_name)
 
+        if log_dir is not None:
+            os.makedirs(log_dir, exist_ok=True)
+            print("[task_registry] log_dir={}".format(log_dir), flush=True)
         runner = runner_class(env, train_cfg_dict, log_dir, args=args, device=args.rl_device)
-        resume = train_cfg.runner.resume
-        if resume:
+
+        pretrained_path = getattr(args, 'pretrained_path', None)
+        if pretrained_path:
+            pretrained_path = os.path.abspath(os.path.expanduser(pretrained_path))
+            if not os.path.isfile(pretrained_path):
+                raise FileNotFoundError(
+                    "Pretrained checkpoint not found: {}".format(pretrained_path)
+                )
+            if getattr(args, 'resume', False):
+                print(
+                    "[task_registry] --pretrained_path is set; ignoring --resume",
+                    flush=True,
+                )
+            print(
+                "[task_registry] loading pretrained weights (optimizer reset): {}".format(
+                    pretrained_path
+                ),
+                flush=True,
+            )
+            runner.load(pretrained_path, load_optimizer=False)
+            # A pretrained checkpoint initializes the policy only. Fine-tuning
+            # starts a fresh dynamic-task run and iteration counter.
+            runner.current_learning_iteration = 0
+        elif train_cfg.runner.resume:
             # load previously trained model
             resume_path = get_load_path(log_root, load_run=train_cfg.runner.load_run, checkpoint=train_cfg.runner.checkpoint)
             self.loaded_policy_path = resume_path

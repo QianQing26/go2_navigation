@@ -61,6 +61,12 @@ The base environment `legged_robot` implements a rough terrain locomotion task. 
     - Add the corresponding assets to `resourses/`.
     - In `cfg` set the asset path, define body names, default_joint_positions and PD gains. Specify the desired `train_cfg` and the name of the environment (python class).
     - In `train_cfg` set `experiment_name` and `run_name`
+
+    Training runs also create `logs/<experiment_name>/<date_time>_<run_name>/` immediately. `train.log` contains flushed phase/iteration output and `metrics.csv` contains per-iteration rollout and loss metrics.
+
+    To fine-tune a dynamic task from a static-task checkpoint, pass `--pretrained_path PATH`. This loads only the Actor-Critic weights, resets the optimizer and starts the dynamic-task iteration counter from zero.
+
+    To inspect the dynamic-obstacle scene interactively, run `python training/legged_gym/legged_gym/scripts/visualize_dynamic_obstacles.py`. It opens one `go2_pos_dynamic` environment and loads the latest `Go2_pos_rough` checkpoint by default. Add `--no_policy` to show only the terrain and moving obstacles without creating a Go2 actor, or pass `--policy_path PATH` to select another checkpoint.
 3. (If needed) implement your environment in <your_env>.py, inherit from an existing environment, overwrite the desired functions and/or add your reward functions.
 4. Register your env in `isaacgym_anymal/envs/__init__.py`.
 5. Modify/Tune other parameters in your `cfg`, `cfg_train` as needed. To remove a reward set its scale to zero. Do not modify parameters of other envs!

@@ -93,11 +93,19 @@ class LeggedRobot(BaseTask):
         Args:
             actions (torch.Tensor): Tensor of shape (num_envs, num_actions_per_env)
         """
-        actions_reindexed = self.reindex(actions)
+        # A pluggable controller may use a different joint convention.  Let
+        # it map its output to simulator order; retain the legacy mapping for
+        # environments that do not install a controller.
+        controller = getattr(self, "controller", None)
+        if controller is not None:
+            actions_reindexed = controller.action_to_sim(actions)
+        else:
+            actions_reindexed = self.reindex(actions)
         clip_actions = self.cfg.normalization.clip_actions
         self.actions = torch.clip(actions_reindexed, -clip_actions, clip_actions).to(self.device)
         
         for _ in range(self.cfg.control.decimation): # self.cfg.control.decimation
+            self._pre_physics_step_callback()
             self.torques = self._compute_torques(self.actions).view(self.torques.shape)
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
             self.gym.simulate(self.sim)
@@ -113,6 +121,11 @@ class LeggedRobot(BaseTask):
         if self.privileged_obs_buf is not None:
             self.privileged_obs_buf = torch.clip(self.privileged_obs_buf, -clip_obs, clip_obs)
         return self.obs_buf, self.privileged_obs_buf, self.rew_buf, self.reset_buf, self.extras
+
+    def _pre_physics_step_callback(self):
+        """Hook for environments that update auxiliary actors before simulation."""
+
+        return None
 
     def post_physics_step(self):
         """ check terminations, compute observations and rewards
@@ -387,7 +400,7 @@ class LeggedRobot(BaseTask):
         env_ids_int32 = env_ids.to(dtype=torch.int32)
         self.gym.set_dof_state_tensor_indexed(self.sim,
                                               gymtorch.unwrap_tensor(self.dof_state),
-                                              gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
+                                              gymtorch.unwrap_tensor(self._robot_actor_indices(env_ids_int32)), len(env_ids_int32))
         
     def _reset_root_states(self, env_ids):
         """ Resets ROOT states position and velocities of selected environmments
@@ -426,15 +439,25 @@ class LeggedRobot(BaseTask):
 
         env_ids_int32 = env_ids.to(dtype=torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(self.sim,
-                                                     gymtorch.unwrap_tensor(self.root_states),
-                                                     gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
+                                                     gymtorch.unwrap_tensor(self._root_states_for_sim()),
+                                                     gymtorch.unwrap_tensor(self._robot_actor_indices(env_ids_int32)), len(env_ids_int32))
 
     def _push_robots(self):
         """ Random pushes the robots. Emulates an impulse by setting a randomized base velocity. 
         """
         max_vel = self.cfg.domain_rand.max_push_vel_xy
         self.root_states[:, 7:9] = self.root_states[:, 7:9] + torch_rand_float(-max_vel, max_vel, (self.num_envs, 2), device=self.device) # lin vel x/y
-        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_states))
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self._root_states_for_sim()))
+
+    def _root_states_for_sim(self):
+        """Return the complete actor root-state tensor for Isaac Gym."""
+
+        return self.all_root_states
+
+    def _robot_actor_indices(self, env_ids):
+        """Map environment ids to simulator actor ids for robot actors."""
+
+        return self.robot_actor_indices[env_ids.to(dtype=torch.long)].to(dtype=env_ids.dtype)
 
     def _update_terrain_curriculum(self, env_ids):
         """ Implements the game-inspired curriculum.
@@ -519,6 +542,23 @@ class LeggedRobot(BaseTask):
 
         # create some wrapper tensors for different slices
         self.root_states = gymtorch.wrap_tensor(actor_root_state)
+        # One actor per environment is the default. Environments with
+        # auxiliary actors may replace root_states with a robot-only view
+        # while retaining all_root_states for simulator updates.
+        self.all_root_states = self.root_states
+        self.robot_actor_indices = torch.arange(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        actors_per_env = int(getattr(self, "actors_per_env", 1))
+        if actors_per_env != 1:
+            self.root_states = self.all_root_states.view(
+                self.num_envs, actors_per_env, 13
+            )[:, 0, :]
+            self.robot_actor_indices = torch.as_tensor(
+                self._robot_actor_indices_list,
+                dtype=torch.long,
+                device=self.device,
+            )
         self.dof_state = gymtorch.wrap_tensor(dof_state_tensor)
         self.dof_pos = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 0]
         self.dof_vel = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 1]
@@ -697,6 +737,7 @@ class LeggedRobot(BaseTask):
         self.num_bodies = self.gym.get_asset_rigid_body_count(robot_asset)
         dof_props_asset = self.gym.get_asset_dof_properties(robot_asset)
         rigid_shape_props_asset = self.gym.get_asset_rigid_shape_properties(robot_asset)
+        self._create_auxiliary_assets()
 
         # save body names from the asset
         body_names = self.gym.get_asset_rigid_body_names(robot_asset)
@@ -750,8 +791,9 @@ class LeggedRobot(BaseTask):
             body_props = self.gym.get_actor_rigid_body_properties(env_handle, actor_handle)
             body_props = self._process_rigid_body_props(body_props, i)
             self.gym.set_actor_rigid_body_properties(env_handle, actor_handle, body_props, recomputeInertia=True)
-            self.envs.append(env_handle)
             self.actor_handles.append(actor_handle)
+            self._create_additional_actors(env_handle, i)
+            self.envs.append(env_handle)
 
         self.feet_indices = torch.zeros(len(feet_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(feet_names)):
@@ -764,6 +806,16 @@ class LeggedRobot(BaseTask):
         self.termination_contact_indices = torch.zeros(len(termination_contact_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(termination_contact_names)):
             self.termination_contact_indices[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], termination_contact_names[i])
+
+    def _create_auxiliary_assets(self):
+        """Hook for task-specific assets created before environment actors."""
+
+        return None
+
+    def _create_additional_actors(self, env_handle, env_id):
+        """Hook for actors that must be created alongside each robot actor."""
+
+        return None
 
     def _get_env_origins(self):
         """ Sets environment origins. On rough terrain the origins are defined by the terrain platforms.

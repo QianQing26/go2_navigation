@@ -30,15 +30,17 @@
 
 import time
 import os
+import csv
 from collections import deque
 import statistics
-from datetime import datetime
 
-# from torch.utils.tensorboard import SummaryWriter
 import torch
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ModuleNotFoundError:
+    SummaryWriter = None
 
 from rsl_rl.env import VecEnv
-import wandb
 from rsl_rl.algorithms.ppo import PPO
 from rsl_rl.modules.actor_critic import ActorCritic
 from rsl_rl.modules.cbf_actor_critic import DifferentiableSafeActorCritic
@@ -83,11 +85,82 @@ class OnPolicyRunner:
         
         self.log_dir = log_dir
         self.writer = None
+        self.log_file = None
+        self.metrics_file = None
+        if self.log_dir is not None:
+            if SummaryWriter is None:
+                raise ImportError(
+                    "TensorBoard logging requires the 'tensorboard' package. "
+                    "Install it with: python -m pip install tensorboard"
+                )
+            # Create the run directory immediately.  The old runner waited
+            # until iteration 100, which made early initialization failures
+            # and long first rollouts impossible to diagnose from logs.
+            os.makedirs(self.log_dir, exist_ok=True)
+            self.writer = SummaryWriter(log_dir=self.log_dir)
+            self.log_file = os.path.join(self.log_dir, 'train.log')
+            self.metrics_file = os.path.join(self.log_dir, 'metrics.csv')
+            if not os.path.exists(self.metrics_file):
+                with open(self.metrics_file, 'w', newline='') as metrics_file:
+                    csv.writer(metrics_file).writerow([
+                        'iteration', 'timesteps', 'collection_sec', 'learning_sec',
+                        'fps', 'rollout_mean_reward', 'episodes_completed',
+                        'mean_episode_reward', 'mean_episode_length',
+                        'value_loss', 'surrogate_loss', 'regularization_loss',
+                        'smooth_loss', 'interv_loss',
+                    ])
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
 
+        self._log(
+            '[runner] log_dir={}'.format(self.log_dir)
+        )
+        self._log(
+            '[runner] resetting environment: num_envs={}, steps_per_env={}'.format(
+                self.env.num_envs, self.num_steps_per_env
+            )
+        )
         _, _ = self.env.reset()
+        self._log('[runner] environment reset complete')
+
+    def _log(self, message):
+        """Print a flushed message and mirror it into the current run log."""
+
+        print(message, flush=True)
+        if self.log_file is not None:
+            with open(self.log_file, 'a', encoding='utf-8') as log_file:
+                log_file.write(message.rstrip() + '\n')
+
+    def _write_metrics(self, locs):
+        if self.metrics_file is None:
+            return
+        episodes_completed = len(locs['rewbuffer'])
+        mean_episode_reward = (
+            statistics.mean(locs['rewbuffer']) if episodes_completed else float('nan')
+        )
+        mean_episode_length = (
+            statistics.mean(locs['lenbuffer']) if episodes_completed else float('nan')
+        )
+        iteration_time = locs['collection_time'] + locs['learn_time']
+        fps = int(self.num_steps_per_env * self.env.num_envs / iteration_time) if iteration_time > 0 else 0
+        with open(self.metrics_file, 'a', newline='') as metrics_file:
+            csv.writer(metrics_file).writerow([
+                locs['it'],
+                self.tot_timesteps,
+                locs['collection_time'],
+                locs['learn_time'],
+                fps,
+                locs['rollout_mean_reward'],
+                episodes_completed,
+                mean_episode_reward,
+                mean_episode_length,
+                locs['mean_value_loss'],
+                locs['mean_surrogate_loss'],
+                locs['mean_regularization_loss'],
+                locs['mean_smooth_loss'],
+                locs['mean_interv_loss'],
+            ])
     
     def learn(self, num_learning_iterations, init_at_random_ep_len=False, config=None):
         
@@ -112,6 +185,11 @@ class OnPolicyRunner:
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
             mean_num_sim = 0
+            self._log(
+                '[runner] iteration {}/{} rollout start'.format(
+                    it + 1, tot_iter
+                )
+            )
             with torch.no_grad():
                 for i in range(self.num_steps_per_env):
                     actions = self.alg.act(obs, critic_obs)
@@ -135,6 +213,12 @@ class OnPolicyRunner:
                 collection_time = stop - start
                 mean_num_sim /= (self.num_steps_per_env)
 
+                self._log(
+                    '[runner] iteration {} rollout complete ({:.3f}s), update start'.format(
+                        it, collection_time
+                    )
+                )
+
                 # Learning step
                 start = stop
                 self.alg.compute_returns(critic_obs, infos)
@@ -143,75 +227,90 @@ class OnPolicyRunner:
             
             stop = time.time()
             learn_time = stop - start
-            if it == self.current_learning_iteration + 10:
-                if self.args.wandb:
-                    wandb.init(
-                            project='Nav_Loc',
-                            name = datetime.now().strftime('%m_%d_%H-%M-%S') ,
-                            config = config,
-                    )
-            if self.log_dir is not None and it % 10 == 0 and it > self.current_learning_iteration + 10:
-                if self.args.wandb:
-                    self.wandb_log(locals())
-                else:
-                    self.print_log(locals(), extra=True)
-            if it == self.current_learning_iteration + 100:
-                os.makedirs(self.log_dir, exist_ok=True)
-            if it % self.save_interval == 0 and it > self.current_learning_iteration + 100:
+            self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
+            self.tot_time += collection_time + learn_time
+            rollout_mean_reward = float(self.alg.storage.rewards.mean().item())
+            locs = locals()
+            self._write_metrics(locs)
+
+            self._log(
+                '[runner] iteration {} update complete ({:.3f}s), rollout_reward={:.4f}'.format(
+                    it, learn_time, rollout_mean_reward
+                )
+            )
+            # TensorBoard is the only online logger.  Write every iteration so
+            # that short runs and interrupted runs still contain a complete
+            # learning curve.
+            self.tensorboard_log(locals())
+            if self.log_dir is not None and it % 10 == 0:
+                self.print_log(locals(), extra=True)
+            if self.log_dir is not None and it % self.save_interval == 0 and it > self.current_learning_iteration:
                 self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
             ep_infos.clear()
         
         self.current_learning_iteration += num_learning_iterations
-        self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
-
+        if self.log_dir is not None:
+            self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
+            self.writer.flush()
+            self.writer.close()
     
-    def wandb_log(self, locs, width=80, pad=35):
-        self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
-        self.tot_time += locs['collection_time'] + locs['learn_time']
-        iteration_time = locs['collection_time'] + locs['learn_time']
+    def tensorboard_log(self, locs):
+        """Write scalar metrics for one completed training iteration."""
+        if self.writer is None:
+            return
 
-        ep_string = f''
-        if locs['ep_infos']:
-            for key in locs['ep_infos'][0]:
-                infotensor = torch.tensor([], device=self.device)
-                for ep_info in locs['ep_infos']:
-                    # handle scalar and zero dimensional tensor infos
-                    if not isinstance(ep_info[key], torch.Tensor):
-                        ep_info[key] = torch.Tensor([ep_info[key]])
-                    if len(ep_info[key].shape) == 0:
-                        ep_info[key] = ep_info[key].unsqueeze(0)
-                    infotensor = torch.cat(
-                        (infotensor, ep_info[key].to(self.device)))
-                value = torch.mean(infotensor)
-                wandb.log({f'Rewards/{key}': value})
-                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
-        mean_std = self.alg.actor_critic.std.mean()
-        fps = int(self.num_steps_per_env * self.env.num_envs /
-                  (locs['collection_time'] + locs['learn_time']))
-
-        wandb.log({
-            'Loss/value_function': locs['mean_value_loss'],
-            'Loss/surrogate': locs['mean_surrogate_loss'], 
-            'Loss/Regularization': locs['mean_regularization_loss'],
-            'Loss/Smooth': locs['mean_smooth_loss'],
-            'Loss/Interv': locs['mean_interv_loss'],
-        })
+        step = int(locs['it'])
+        self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], step)
+        self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], step)
+        self.writer.add_scalar('Loss/regularization', locs['mean_regularization_loss'], step)
+        self.writer.add_scalar('Loss/smooth', locs['mean_smooth_loss'], step)
+        self.writer.add_scalar('Loss/intervention', locs['mean_interv_loss'], step)
+        self.writer.add_scalar('Train/rollout_reward', locs['rollout_mean_reward'], step)
+        self.writer.add_scalar('Train/collection_seconds', locs['collection_time'], step)
+        self.writer.add_scalar('Train/learning_seconds', locs['learn_time'], step)
+        self.writer.add_scalar(
+            'Train/fps',
+            self.num_steps_per_env * self.env.num_envs /
+            max(locs['collection_time'] + locs['learn_time'], 1e-9),
+            step,
+        )
 
         if len(locs['rewbuffer']) > 0:
-            wandb.log({
-                'Train/iteration':  locs['it'],
-                'Train/mean_reward': statistics.mean(locs['rewbuffer']),
-                'Train/mean_episode_length': statistics.mean(locs['lenbuffer']),
-                'Train/mean_num_sim': locs['mean_num_sim'],
-            })
-            self.print_log(locs)
+            self.writer.add_scalar(
+                'Train/mean_episode_reward', statistics.mean(locs['rewbuffer']), step
+            )
+            self.writer.add_scalar(
+                'Train/mean_episode_length', statistics.mean(locs['lenbuffer']), step
+            )
+
+        if locs['ep_infos']:
+            for key in locs['ep_infos'][0]:
+                values = []
+                for ep_info in locs['ep_infos']:
+                    value = ep_info[key]
+                    if isinstance(value, torch.Tensor):
+                        values.append(value.detach().float().mean().item())
+                    else:
+                        values.append(float(value))
+                if values:
+                    self.writer.add_scalar('Rewards/{}'.format(key), statistics.mean(values), step)
+
+        # Make the current iteration visible immediately when tailing the log
+        # or monitoring TensorBoard during a long-running job.
+        self.writer.flush()
 
     def print_log(self, locs, width=80, pad=35, extra=True):
-        if not len(locs['rewbuffer']) > 0:
-            return
-        self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
-        self.tot_time += locs['collection_time'] + locs['learn_time']
         iteration_time = locs['collection_time'] + locs['learn_time']
+        mean_reward = (
+            statistics.mean(locs['rewbuffer'])
+            if len(locs['rewbuffer']) > 0
+            else locs.get('rollout_mean_reward', float('nan'))
+        )
+        mean_episode_length = (
+            statistics.mean(locs['lenbuffer'])
+            if len(locs['lenbuffer']) > 0
+            else float('nan')
+        )
         ep_string = f''
         if extra:
             if locs['ep_infos']:
@@ -238,12 +337,13 @@ class OnPolicyRunner:
                       f"""{'Regularization loss:':>{pad}} {locs['mean_regularization_loss']:.4f}\n"""""
                       f"""{'Smooth loss:':>{pad}} {locs['mean_smooth_loss']:.4f}\n"""""
                       f"""{'Interv loss:':>{pad}} {locs['mean_interv_loss']:.4f}\n"""""
-                      f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
-                      f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
+                      f"""{'Mean reward:':>{pad}} {mean_reward:.2f}\n"""
+                      f"""{'Mean episode length:':>{pad}} {mean_episode_length:.2f}\n"""
+                      f"""{'Episodes completed:':>{pad}} {len(locs['rewbuffer'])}\n"""
                       )
         log_string += ep_string
 
-        print(log_string)
+        self._log(log_string.rstrip())
 
     def save(self, path, infos=None):
         torch.save({

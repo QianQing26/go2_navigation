@@ -69,9 +69,36 @@ Controller-owned observation construction, model inference and history reset
 are implemented under `training/legged_gym/legged_gym/controllers/`. The
 `robogauge` controller loads the configured batchable `go2_moe_cts` TorchScript
 policy, builds its 45-D source observation, and lets the policy maintain its
-five-step history. The ONNX backend is optional and requires `onnxruntime`;
+five-step history. Its source-compatible scales are linear/angular velocity
+`2.0/0.25`, joint position/velocity `1.0/0.05`, command `[2.0, 2.0, 0.25]`,
+and PD action scale `0.25`; its Go2 model order is kept separate from the
+legacy SEA-Nav sim-to-real permutation. The ONNX backend is optional and
+requires `onnxruntime`;
 by default it looks for the `.onnx` counterparts of the existing controller
 model files.
+
+The first-stage dynamic-obstacle navigation task is registered separately as
+`go2_pos_dynamic`, so `go2_pos_rough` is unchanged. It uses the same
+navigation observation layout, adds six gravity-free linearly moving box
+actors per environment, and fuses their analytic ray intersections with the
+existing terrain rays. Run it with:
+
+```bash
+python training/legged_gym/legged_gym/scripts/train.py --task go2_pos_dynamic
+```
+
+Before training, the configured low-level controller can be smoke-tested
+without loading a navigation PPO policy. The test resets once and then sends
+forward/backward, lateral, in-place-turning, and stop commands:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python training/legged_gym/legged_gym/scripts/test_low_level_controller.py
+```
+
+The test uses a flat terrain mesh and does not alter `go2_pos_rough`. Add
+`--controller torchscript` (or another registered name) to override the
+controller configured by the task, `--headless` for a non-visual run, or
+adjust each phase with `--phase_steps N`.
 
 ---
 

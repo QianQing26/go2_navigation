@@ -33,6 +33,8 @@ from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 from .base.legged_robot import LeggedRobot
 from .base.legged_robot_pos import LeggedRobotPos
 from .go2.go2_pos_config import Go2PosRoughCfg, Go2PosRoughCfgPPO
+from .go2.go2_pos_dynamic import DynamicObstacleGo2Pos
+from .go2.go2_pos_dynamic_config import Go2PosDynamicCfg, Go2PosDynamicCfgPPO
 
 import os
 
@@ -41,3 +43,9 @@ from legged_gym.utils.task_registry import task_registry
 
 ## PPO
 task_registry.register( "go2_pos_rough", LeggedRobotPos, Go2PosRoughCfg(), Go2PosRoughCfgPPO())
+task_registry.register(
+    "go2_pos_dynamic",
+    DynamicObstacleGo2Pos,
+    Go2PosDynamicCfg(),
+    Go2PosDynamicCfgPPO(),
+)

@@ -129,6 +129,7 @@ class LeggedRobotPos(LeggedRobot):
         self.collision_occurred = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self.last_collision_active = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self.is_replay = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.replay_undo_steps = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.fall_down = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         
         # --- Collision Visualization ---
@@ -174,7 +175,10 @@ class LeggedRobotPos(LeggedRobot):
         Returns:
             [torch.Tensor]: Torques sent to the simulation
         """
-        actions_scaled = actions[:, :12] * 0.25
+        # Controller outputs are normalized joint-position residuals.  The
+        # policy-specific residual scale belongs to the task control config,
+        # matching go2_rl_gym's ``action_scale`` handling.
+        actions_scaled = actions[:, :12] * self.cfg.control.action_scale
         joint_pos_target = actions_scaled + self.default_dof_pos
         torques = self.p_gains * (joint_pos_target- self.dof_pos) - self.d_gains * self.dof_vel
         torques = torques 
@@ -202,6 +206,32 @@ class LeggedRobotPos(LeggedRobot):
         self.nav_actions_filtered = alpha * self.nav_actions_orig + (1 - alpha) * self.nav_actions_filtered
         self.nav_actions_after_clip = torch.clip(self.nav_actions_filtered, min=self.nav_clip_min, max=self.nav_clip_max)
 
+    def _terrain_type_for_col(self, col):
+        """Return the configured terrain type that owns a terrain-map column.
+
+        ``Terrain`` expands ``cfg.terrain.terrain_types`` into
+        ``cfg.terrain.num_cols`` map columns according to
+        ``terrain_proportions``.  The position task stores the expanded map
+        column in ``self.terrain_types``; indexing the shorter configuration
+        list directly therefore fails for the common one-type case
+        (for example ``['hard_room']`` with ``num_cols=10``).
+        """
+        terrain_types = list(self.cfg.terrain.terrain_types)
+        if not terrain_types:
+            raise ValueError("cfg.terrain.terrain_types must contain at least one terrain type")
+        if len(terrain_types) == 1:
+            return terrain_types[0]
+
+        proportions = np.asarray(self.cfg.terrain.terrain_proportions, dtype=np.float64)
+        if proportions.size != len(terrain_types) or proportions.sum() <= 0:
+            raise ValueError(
+                "terrain_proportions must have one positive entry per terrain type"
+            )
+        boundaries = np.cumsum(proportions / proportions.sum()) * self.cfg.terrain.num_cols
+        type_idx = int(np.searchsorted(boundaries, int(col), side="right"))
+        type_idx = min(type_idx, len(terrain_types) - 1)
+        return terrain_types[type_idx]
+
     def step(self, nav_actions):
         clip_actions = self.cfg.normalization.clip_actions
         self.nav_actions_orig = torch.clip(nav_actions, -3.0, 3.0).to(self.device)
@@ -217,7 +247,10 @@ class LeggedRobotPos(LeggedRobot):
         self.custom_origins = True
         self.env_origins = torch.zeros(self.num_envs, 3, device=self.device, requires_grad=False)
         self.position_targets = torch.zeros(self.num_envs, 3, device=self.device, requires_grad=False)
-        self.terrain_levels = torch.randint(0, 2, (self.num_envs,), device=self.device)
+        # Preserve the historical two-row sampling for room tasks, while
+        # allowing one-row flat test terrains without spawning off the mesh.
+        num_origin_rows = max(1, min(2, int(self.cfg.terrain.num_rows)))
+        self.terrain_levels = torch.randint(0, num_origin_rows, (self.num_envs,), device=self.device)
         self.goal_levels = torch.zeros(self.num_envs, device=self.device)
         self.terrain_types = torch.div(torch.arange(self.num_envs, device=self.device), (self.num_envs/self.cfg.terrain.num_cols), rounding_mode='floor').to(torch.long)
         self.max_terrain_level = self.cfg.terrain.num_rows
@@ -228,7 +261,15 @@ class LeggedRobotPos(LeggedRobot):
             col = int(self.terrain_types[i])
             scaled_room = self.terrain.select_room(row, col)
             grid_size_x, grid_size_y = scaled_room.shape
-            robot_pos, goal_pos = place_robot_and_goal(scaled_room) 
+            terrain_type = self._terrain_type_for_col(col)
+            if terrain_type == 'flat':
+                # A flat terrain has no obstacle-defined path, so the room
+                # placement helper (which intentionally requires a blocked
+                # path) cannot be used. Keep both poses well inside the cell.
+                robot_pos = [grid_size_x // 2, grid_size_y // 2]
+                goal_pos = [grid_size_x * 3 // 4, grid_size_y // 2]
+            else:
+                robot_pos, goal_pos = place_robot_and_goal(scaled_room)
             robot_pos = torch.tensor(robot_pos, device = self.device)
             goal_pos = torch.tensor(goal_pos, device = self.device)
             robot_origin_x = (row + (robot_pos[0])/grid_size_x) * self.terrain.env_length
@@ -272,8 +313,8 @@ class LeggedRobotPos(LeggedRobot):
 
         env_ids_int32 = env_ids.to(dtype=torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(self.sim,
-                                                     gymtorch.unwrap_tensor(self.root_states),
-                                                     gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
+                                                     gymtorch.unwrap_tensor(self._root_states_for_sim()),
+                                                     gymtorch.unwrap_tensor(self._robot_actor_indices(env_ids_int32)), len(env_ids_int32))
 
     def _reset_collision_replay(self, env_ids):
         # Decide replay step: based on config range
@@ -298,9 +339,10 @@ class LeggedRobotPos(LeggedRobot):
             self.is_replay[fallback_ids] = False
         
         if len(replay_ids) == 0:
-            return
+            return replay_ids, fallback_ids
 
         self.is_replay[replay_ids] = True
+        self.replay_undo_steps[replay_ids] = undo_steps[valid_replay]
         indices = -undo_steps[valid_replay]
         
         # Fetch from buffer
@@ -312,12 +354,25 @@ class LeggedRobotPos(LeggedRobot):
         # Update simulation state
         env_ids_int32 = replay_ids.to(dtype=torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(self.sim,
-                                                     gymtorch.unwrap_tensor(self.root_states),
-                                                     gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
+                                                     gymtorch.unwrap_tensor(self._root_states_for_sim()),
+                                                     gymtorch.unwrap_tensor(self._robot_actor_indices(env_ids_int32)), len(env_ids_int32))
 
         self.gym.set_dof_state_tensor_indexed(self.sim,
                                               gymtorch.unwrap_tensor(self.dof_state),
-                                              gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
+                                              gymtorch.unwrap_tensor(self._robot_actor_indices(env_ids_int32)), len(env_ids_int32))
+
+        return replay_ids, fallback_ids
+
+    def _reset_auxiliary_states(self, env_ids, replay_ids, normal_ids):
+        """Hook for task-specific state reset alongside robot replay.
+
+        ``replay_ids`` contains only environments for which a historical robot
+        state was actually available. ``normal_ids`` also includes replay
+        candidates that fell back to a normal reset because their history was
+        too short.
+        """
+
+        return None
 
     def reset_idx(self, env_ids):
         if len(env_ids) == 0:
@@ -334,12 +389,14 @@ class LeggedRobotPos(LeggedRobot):
         prob_replay = getattr(self.cfg.replay, 'replay_prob', 0.8)
         wants_replay = enable_replay & (torch.rand(len(env_ids), device=self.device) < prob_replay) & is_collision & (~is_success) & (~is_timeout)
         
-        replay_ids = env_ids[wants_replay]
+        replay_candidates = env_ids[wants_replay]
         normal_ids = env_ids[~wants_replay]
+        replay_ids = env_ids.new_empty((0,), dtype=torch.long)
+        replay_fallback_ids = env_ids.new_empty((0,), dtype=torch.long)
         
         # Replay Reset
-        if len(replay_ids) > 0:
-            self._reset_collision_replay(replay_ids)
+        if len(replay_candidates) > 0:
+            replay_ids, replay_fallback_ids = self._reset_collision_replay(replay_candidates)
 
         # Normal Reset
         if len(normal_ids) > 0:
@@ -348,6 +405,11 @@ class LeggedRobotPos(LeggedRobot):
             self._reset_dofs(normal_ids)
             self._reset_root_states(normal_ids)
             self.is_replay[normal_ids] = False
+
+        auxiliary_normal_ids = normal_ids
+        if len(replay_fallback_ids) > 0:
+            auxiliary_normal_ids = torch.cat((auxiliary_normal_ids, replay_fallback_ids))
+        self._reset_auxiliary_states(env_ids, replay_ids, auxiliary_normal_ids)
 
         # Common Reset Logic (Buffers)
         # We do this for ALL envs
@@ -368,6 +430,7 @@ class LeggedRobotPos(LeggedRobot):
         self.reach_goal[env_ids] = 0
         self.nav_actions_filtered[env_ids] = 0.
         self.controller.reset(env_ids)
+        self.replay_undo_steps[env_ids] = 0
         
         self.contact_filt[env_ids] = False
         self.last_contacts[env_ids] = False
@@ -412,7 +475,12 @@ class LeggedRobotPos(LeggedRobot):
             col = int(self.terrain_types[i])
             scaled_room = self.terrain.select_room(row, col)
             grid_size_x, grid_size_y = scaled_room.shape
-            robot_pos, goal_pos = place_robot_and_goal(scaled_room)
+            terrain_type = self._terrain_type_for_col(col)
+            if terrain_type == 'flat':
+                robot_pos = [grid_size_x // 2, grid_size_y // 2]
+                goal_pos = [grid_size_x * 3 // 4, grid_size_y // 2]
+            else:
+                robot_pos, goal_pos = place_robot_and_goal(scaled_room)
             robot_pos = torch.tensor(robot_pos, device = self.device)
             goal_pos = torch.tensor(goal_pos, device = self.device)
             robot_origin_x = (row + (robot_pos[0])/grid_size_x) * self.terrain.env_length # *10

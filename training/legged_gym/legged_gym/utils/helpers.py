@@ -155,6 +155,7 @@ def get_args():
     custom_parameters = [
         {"name": "--task", "type": str, "default": "go2_pos_rough", "help": "Resume training or start testing from a checkpoint. Overrides config file if provided."},
         {"name": "--resume", "action": "store_true", "default": False,  "help": "Resume training from a checkpoint"},
+        {"name": "--pretrained_path", "type": str, "default": None, "help": "Load Actor-Critic weights from a checkpoint before fine-tuning. Optimizer state and iteration are reset."},
         {"name": "--experiment_name", "type": str,  "help": "Name of the experiment to run or load. Overrides config file if provided."},
         {"name": "--run_name", "type": str,  "help": "Name of the run. Overrides config file if provided."},
         {"name": "--load_run", "type": str,  "help": "Name of the run to load when resume=True. If -1: will load the last run. Overrides config file if provided."},
@@ -181,7 +182,9 @@ def get_args():
         args.sim_device += f":{args.sim_device_id}"
         
     # default logic for train and test
-    args.wandb = not args.no_wandb
+    # Training uses local TensorBoard logging only.  Keep the attribute for
+    # compatibility with older scripts, but never enable WandB implicitly.
+    args.wandb = False
     args.rl_device = args.sim_device
     if args.test:
         args.headless = False

@@ -89,6 +89,12 @@ class RoboGaugeJointPositionController(BaseController):
         self.noise_enabled = bool(getattr(self.cfg, "add_noise", False))
         self.noise_level = float(getattr(self.cfg, "noise_level", 1.0))
 
+        # go2_rl_gym's go2_moe_cts model is trained and deployed in the
+        # original Go2 URDF/model order (FL, FR, RL, RR).  The Go2 asset used
+        # by this repository has the same order, so do not apply SEA-Nav's
+        # legacy sim-to-real permutation to either observations or actions.
+        self.joint_reindex = None
+
     def _reindex_joints(self, tensor):
         if self.joint_reindex is None:
             return tensor

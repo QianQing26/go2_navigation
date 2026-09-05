@@ -87,6 +87,19 @@ class BaseController(ABC):
             action = torch.clamp(action, -float(clip_actions), float(clip_actions))
         return action
 
+    def action_to_sim(self, action: torch.Tensor) -> torch.Tensor:
+        """Map controller/model joint order to Isaac Gym joint order.
+
+        The legacy SEA-Nav TorchScript controller uses the configured
+        sim-to-policy permutation.  Controllers imported from another
+        project may already use the Isaac/URDF order and can set
+        ``joint_reindex`` to ``None``.
+        """
+
+        if self.joint_reindex is None:
+            return action
+        return action.index_select(1, self.joint_reindex)
+
     @torch.no_grad()
     def get_action(self, state: ControllerState) -> torch.Tensor:
         """Build input, infer, and return a simulator-ready joint action."""
