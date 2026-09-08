@@ -4,6 +4,7 @@ Examples:
     python .../validate_dynamic_obstacles.py --mode rays
     python .../validate_dynamic_obstacles.py --mode gt --headless
     python .../validate_dynamic_obstacles.py --mode collision --headless
+    python .../validate_dynamic_obstacles.py --mode closing --headless
 """
 
 import argparse
@@ -21,7 +22,7 @@ import torch
 def _parse_script_args():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
-        '--mode', choices=['rays', 'gt', 'collision', 'spawn', 'all'], default='all'
+        '--mode', choices=['rays', 'gt', 'collision', 'spawn', 'closing', 'all'], default='all'
     )
     parser.add_argument('--steps', type=int, default=100)
     parser.add_argument('--print-every', type=int, default=5)
@@ -290,6 +291,122 @@ def _run_spawn(env, steps, print_every):
             )
 
 
+def _robot_frame_to_world(env, vector_xy):
+    """Convert one robot-yaw-frame XY vector to the world frame."""
+    quat = env.base_quat[0]
+    sin_yaw = 2.0 * (quat[3] * quat[2] + quat[0] * quat[1])
+    cos_yaw = 1.0 - 2.0 * (quat[1].square() + quat[2].square())
+    vector_xy = torch.as_tensor(vector_xy, device=env.device, dtype=torch.float)
+    return torch.stack((
+        vector_xy[0] * cos_yaw - vector_xy[1] * sin_yaw,
+        vector_xy[0] * sin_yaw + vector_xy[1] * cos_yaw,
+    ))
+
+
+def _world_to_robot_frame(env, vector_xy):
+    """Convert one world-frame XY vector to the robot yaw frame."""
+    quat = env.base_quat[0]
+    sin_yaw = 2.0 * (quat[3] * quat[2] + quat[0] * quat[1])
+    cos_yaw = 1.0 - 2.0 * (quat[1].square() + quat[2].square())
+    vector_xy = torch.as_tensor(vector_xy, device=env.device, dtype=torch.float)
+    return torch.stack((
+        vector_xy[0] * cos_yaw + vector_xy[1] * sin_yaw,
+        -vector_xy[0] * sin_yaw + vector_xy[1] * cos_yaw,
+    ))
+
+
+def _set_closing_case(env, robot_frame_offset, robot_frame_velocity):
+    """Set a deterministic primary obstacle without advancing the simulator."""
+    low = env.dynamic_obstacle_effective_low[0]
+    high = env.dynamic_obstacle_effective_high[0]
+    span = high - low
+    fractions = torch.tensor(
+        [[0.15, 0.15], [0.85, 0.15], [0.15, 0.85],
+         [0.85, 0.85], [0.5, 0.15], [0.5, 0.85]],
+        device=env.device, dtype=torch.float,
+    )
+    starts = low + fractions[:env.num_dynamic_obstacles] * span
+    robot_local = env.root_states[0, :2] - env.env_origins[0, :2]
+    primary = robot_local + _robot_frame_to_world(env, robot_frame_offset)
+    starts[0] = torch.minimum(torch.maximum(primary, low + 0.01), high - 0.01)
+    velocities = torch.zeros_like(starts)
+    velocities[0] = _robot_frame_to_world(env, robot_frame_velocity)
+    env.dynamic_obstacle_start[:] = starts.unsqueeze(0)
+    env.dynamic_obstacle_velocity[:] = velocities.unsqueeze(0)
+    env.dynamic_obstacle_time[:] = 0.0
+    env._write_dynamic_obstacle_states()
+    env._set_dynamic_obstacle_states_in_sim()
+    env._get_rays()
+
+
+def _print_closing(env, name):
+    angles = torch.rad2deg(env.ray_angles).detach().cpu().numpy()
+    current = env.rays[0].detach().cpu().numpy()
+    future = env.closing_rate_gt_future_fused_rays[0].detach().cpu().numpy()
+    closing = env.closing_rate_gt[0].detach().cpu().numpy()
+    print('[closing] case={} horizon={:.3f}s'.format(name, env.gt_horizon), flush=True)
+    print('  angles_deg={}'.format(np.array2string(angles, precision=1)), flush=True)
+    print('  current_fused_ray={}'.format(np.array2string(current, precision=3)), flush=True)
+    print('  future_fused_ray={}'.format(np.array2string(future, precision=3)), flush=True)
+    print('  closing_rate_gt={}'.format(np.array2string(closing, precision=3)), flush=True)
+
+
+def _run_closing(env, steps, print_every):
+    """Run five deterministic checks for the counterfactual closing label."""
+    del steps, print_every
+    env.do_reset = False
+    tolerance = 1e-5
+
+    # A: zero obstacle velocity leaves both dynamic and fused boundaries fixed.
+    _set_closing_case(env, [2.0, 0.0], [0.0, 0.0])
+    _print_closing(env, 'A-static')
+    assert torch.allclose(env.closing_rate_gt, torch.zeros_like(env.closing_rate_gt), atol=tolerance)
+
+    # B/C: use the same visible center ray and select rays where the dynamic
+    # obstacle is the current fused boundary, avoiding static-wall masking.
+    _set_closing_case(env, [2.0, 0.0], [-1.0, 0.0])
+    _print_closing(env, 'B-approaching')
+    visible = env.dynamic_ray_hit_mask & (env.static_rays > env.dynamic_rays + tolerance)
+    assert visible.any() and env.closing_rate_gt[0, visible[0]].max() > tolerance
+
+    _set_closing_case(env, [2.0, 0.0], [1.0, 0.0])
+    _print_closing(env, 'C-receding')
+    visible = env.dynamic_ray_hit_mask & (env.static_rays > env.dynamic_rays + tolerance)
+    assert visible.any() and env.closing_rate_gt[0, visible[0]].min() < -tolerance
+
+    # D: lateral motion changes the angular sector and contracts at least one
+    # safety boundary ray; print every ray for manual sector inspection.
+    _set_closing_case(env, [2.0, -0.8], [0.0, 4.0])
+    _print_closing(env, 'D-crossing')
+    assert torch.isfinite(env.closing_rate_gt).all()
+    assert torch.max(torch.abs(env.closing_rate_gt)) > tolerance
+
+    # E: place the obstacle just below the effective x-bound and query beyond
+    # it. The pure trajectory query must reflect, unlike constant velocity.
+    high_x = env.dynamic_obstacle_effective_high[0, 0]
+    robot_local = env.root_states[0, :2] - env.env_origins[0, :2]
+    reflection_world_offset = torch.stack((high_x - robot_local[0] - 0.02, robot_local[1] * 0.0))
+    reflection_offset = _world_to_robot_frame(env, reflection_world_offset)
+    reflection_velocity = _world_to_robot_frame(env, [1.0, 0.0])
+    _set_closing_case(env, reflection_offset, reflection_velocity)
+    _print_closing(env, 'E-reflection')
+    future_position, _ = env._compute_dynamic_obstacle_states_at_time(
+        query_time=env.dynamic_obstacle_time + env.gt_horizon
+    )
+    current_position = env.dynamic_obstacle_states[..., :2]
+    current_velocity = env.dynamic_obstacle_states[..., 7:9]
+    constant_velocity_position = current_position + current_velocity * env.gt_horizon
+    reflected_step = future_position[:, 0] - current_position[:, 0]
+    constant_step = constant_velocity_position[:, 0] - current_position[:, 0]
+    print('  reflection_future_xy={} constant_velocity_xy={}'.format(
+        np.array2string(future_position[0, 0].detach().cpu().numpy(), precision=3),
+        np.array2string(constant_velocity_position[0, 0].detach().cpu().numpy(), precision=3),
+    ), flush=True)
+    assert torch.linalg.vector_norm(future_position - constant_velocity_position)[:, 0].max() > tolerance
+    assert (reflected_step[:, 0] * constant_step[:, 0] < 0.0).any()
+    print('[closing] all five sanity cases passed', flush=True)
+
+
 def main():
     script_args = _parse_script_args()
     args = get_args()
@@ -323,7 +440,7 @@ def main():
     try:
         env.reset()
         modes = (
-            ['rays', 'gt', 'collision']
+            ['rays', 'gt', 'collision', 'closing']
             if script_args.mode == 'all'
             else [script_args.mode]
         )
@@ -342,6 +459,8 @@ def main():
                 _run_collision(env, min(script_args.steps, 5), script_args.print_every)
             elif mode == 'spawn':
                 _run_spawn(env, script_args.steps, script_args.print_every)
+            elif mode == 'closing':
+                _run_closing(env, script_args.steps, script_args.print_every)
     finally:
         if env.viewer is not None:
             env.gym.destroy_viewer(env.viewer)

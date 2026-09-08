@@ -164,6 +164,19 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         self.dynamic_ray_hit_mask = torch.zeros_like(
             self.rays, dtype=torch.bool
         )
+        self.static_rays = torch.full_like(
+            self.rays, float(self.cfg.sensors.ray2d.max_dist)
+        )
+        self.closing_rate_gt = torch.zeros_like(self.rays)
+        self.closing_rate_gt_future_fused_rays = torch.full_like(
+            self.rays, float(self.cfg.sensors.ray2d.max_dist)
+        )
+        motion_estimation_cfg = getattr(self.cfg, 'motion_estimation', None)
+        self.gt_horizon = float(
+            getattr(motion_estimation_cfg, 'gt_horizon', 0.1)
+        )
+        if self.gt_horizon <= 0.0:
+            raise ValueError('motion_estimation.gt_horizon must be positive')
 
         self._reset_dynamic_obstacles(
             torch.arange(self.num_envs, device=self.device, dtype=torch.long)
@@ -413,27 +426,58 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
     def _write_dynamic_obstacle_states(self, env_ids=None):
         self._write_dynamic_obstacle_states_at_time(env_ids=env_ids)
 
-    def _write_dynamic_obstacle_states_at_time(self, env_ids=None, time_override=None):
+    def _compute_dynamic_obstacle_states_at_time(
+        self, env_ids=None, query_time=None
+    ):
+        """Purely evaluate reflected obstacle trajectories at an arbitrary time."""
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        else:
+            env_ids = torch.as_tensor(
+                env_ids, device=self.device, dtype=torch.long
+            )
+
+        if query_time is None:
+            time = self.dynamic_obstacle_time[env_ids]
+        else:
+            time = torch.as_tensor(
+                query_time, device=self.device,
+                dtype=self.dynamic_obstacle_time.dtype,
+            ).reshape(-1)
+            if time.numel() == 1:
+                time = time.expand(len(env_ids))
+            elif time.numel() != len(env_ids):
+                raise ValueError(
+                    'query_time must be a scalar or have one value per env_id'
+                )
+
         low = self.dynamic_obstacle_effective_low[env_ids].view(-1, 1, 2)
         high = self.dynamic_obstacle_effective_high[env_ids].view(-1, 1, 2)
         span = high - low
-        if time_override is None:
-            time = self.dynamic_obstacle_time[env_ids].view(-1, 1, 1)
-        else:
-            time = time_override.view(-1, 1, 1)
-        travel = self.dynamic_obstacle_start[env_ids] + self.dynamic_obstacle_velocity[env_ids] * time
+        travel = self.dynamic_obstacle_start[env_ids] + self.dynamic_obstacle_velocity[env_ids] * time.view(-1, 1, 1)
         phase = torch.remainder(travel - low, 2.0 * span)
         reflected = torch.where(phase <= span, phase, 2.0 * span - phase) + low
         direction = torch.where(phase <= span, 1.0, -1.0)
         velocity = self.dynamic_obstacle_velocity[env_ids] * direction
+        position = self.env_origins[env_ids, None, 0:2] + reflected
+        return position, velocity
+
+    def _write_dynamic_obstacle_states_at_time(self, env_ids=None, time_override=None):
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        else:
+            env_ids = torch.as_tensor(
+                env_ids, device=self.device, dtype=torch.long
+            )
+        position, velocity = self._compute_dynamic_obstacle_states_at_time(
+            env_ids=env_ids, query_time=time_override
+        )
 
         # ``tensor[env_ids]`` is an advanced-indexing copy in PyTorch.  Assign
         # directly to the original tensor so the values are written back to
         # the simulator root-state buffer.
         self.dynamic_obstacle_states[env_ids, :, 0:2] = (
-            self.env_origins[env_ids, None, 0:2] + reflected
+            position
         )
         self.dynamic_obstacle_states[env_ids, :, 2] = self.dynamic_obstacle_height * 0.5
         self.dynamic_obstacle_states[env_ids, :, 3:7] = 0.0
@@ -508,18 +552,20 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         )
         self._set_dynamic_obstacle_states_in_sim(replay_ids)
 
-    def _get_rays(self, env_ids=None):
-        """Fuse terrain rays with analytic ray-box approximations."""
+    def _compute_dynamic_rays_from_positions(
+        self, obstacle_xy, robot_xy, robot_quat
+    ):
+        """Purely compute analytic dynamic rays for arbitrary poses.
 
-        super()._get_rays(env_ids)
-        obstacle_xy = self.dynamic_obstacle_states[..., :2]
-        delta = obstacle_xy - self.root_states[:, None, :2]
+        This preserves the existing ray convention, range limits, and
+        bounding-circle approximation while allowing counterfactual queries.
+        """
+        delta = obstacle_xy - robot_xy.unsqueeze(1)
 
         # Transform obstacle centers from world coordinates into the robot's
         # yaw-aligned frame, matching the terrain ray convention.
-        quat = self.base_quat
-        sin_yaw = 2.0 * (quat[:, 3] * quat[:, 2] + quat[:, 0] * quat[:, 1])
-        cos_yaw = 1.0 - 2.0 * (quat[:, 1].square() + quat[:, 2].square())
+        sin_yaw = 2.0 * (robot_quat[:, 3] * robot_quat[:, 2] + robot_quat[:, 0] * robot_quat[:, 1])
+        cos_yaw = 1.0 - 2.0 * (robot_quat[:, 1].square() + robot_quat[:, 2].square())
         x = delta[..., 0] * cos_yaw[:, None] + delta[..., 1] * sin_yaw[:, None]
         y = -delta[..., 0] * sin_yaw[:, None] + delta[..., 1] * cos_yaw[:, None]
 
@@ -540,9 +586,36 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
             near,
             torch.full_like(near, float(self.cfg.sensors.ray2d.max_dist)),
         ).amin(dim=1)
+        return dynamic_rays, valid.any(dim=1)
+
+    def _update_closing_rate_gt(self, static_rays, current_dynamic_rays):
+        """Build fused finite-horizon dynamic-only boundary closing labels."""
+        current_fused = torch.minimum(static_rays, current_dynamic_rays)
+        future_position, _ = self._compute_dynamic_obstacle_states_at_time(
+            query_time=self.dynamic_obstacle_time + self.gt_horizon
+        )
+        future_dynamic_rays, _ = self._compute_dynamic_rays_from_positions(
+            future_position, self.root_states[:, :2], self.base_quat
+        )
+        future_fused = torch.minimum(static_rays, future_dynamic_rays)
+        self.closing_rate_gt = (current_fused - future_fused) / self.gt_horizon
+        self.closing_rate_gt_future_fused_rays = future_fused
+
+    def _get_rays(self, env_ids=None):
+        """Fuse terrain rays with analytic ray-box approximations."""
+
+        super()._get_rays(env_ids)
+        static_rays = self.rays.clone()
+        dynamic_rays, hit_mask = self._compute_dynamic_rays_from_positions(
+            self.dynamic_obstacle_states[..., :2],
+            self.root_states[:, :2],
+            self.base_quat,
+        )
+        self.static_rays = static_rays
         self.dynamic_rays = dynamic_rays
-        self.dynamic_ray_hit_mask = valid.any(dim=1)
+        self.dynamic_ray_hit_mask = hit_mask
         self.rays = torch.minimum(self.rays, dynamic_rays)
+        self._update_closing_rate_gt(static_rays, dynamic_rays)
 
     def get_dynamic_obstacle_gt(self, relative_to_robot=False):
         """Return simulator ground truth for dynamic obstacles.
@@ -584,3 +657,7 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
 
     def reset_idx(self, env_ids):
         super().reset_idx(env_ids)
+        self.closing_rate_gt[env_ids] = 0.0
+        self.closing_rate_gt_future_fused_rays[env_ids] = float(
+            self.cfg.sensors.ray2d.max_dist
+        )

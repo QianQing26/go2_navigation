@@ -116,6 +116,8 @@ class LeggedRobotPos(LeggedRobot):
         
         self.rays_hist = torch.ones(
                 self.num_envs, self.cfg.env.his_len, self.ray_angles.shape[0], device=self.device, dtype=torch.float) * 5.0
+        self.motion_ego_hist = torch.zeros(
+                self.num_envs, self.cfg.env.his_len, 3, device=self.device, dtype=torch.float)
         self.goal_hold_timer = torch.zeros(self.num_envs, device=self.device, dtype=torch.int) 
         self.stay_timer = torch.zeros(self.num_envs, device=self.device, dtype=torch.int) 
         self.goal_reached_flag = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)  
@@ -443,6 +445,7 @@ class LeggedRobotPos(LeggedRobot):
         self.obs_history_buf[env_ids, :, :] = 0.
         self.exteroception_step_buf[env_ids] = 0
         self.rays_hist[env_ids, :, :] = 5.
+        self.motion_ego_hist[env_ids, :, :] = 0.
         self.pos_hist[env_ids, :, :] = 0.
         self.goal_hist[env_ids, :, :] = 0.
         
@@ -735,11 +738,17 @@ class LeggedRobotPos(LeggedRobot):
 
         self.exteroception_step_buf[update_ids] = 0
         self.rays_rand = self.rays.clone() + torch.rand_like(self.rays) * 0.0
+        motion_ego = torch.cat((
+            self.base_lin_vel[:, :2], self.base_ang_vel[:, 2:3]
+        ), dim=-1)
         reset_ids = update_ids[is_new_episode[update_ids]]
         rolling_ids = update_ids[~is_new_episode[update_ids]]
 
         if len(reset_ids) > 0:
             self.rays_hist[reset_ids] = self.rays_rand[reset_ids].unsqueeze(1).expand(
+                -1, self.cfg.env.his_len, -1
+            )
+            self.motion_ego_hist[reset_ids] = motion_ego[reset_ids].unsqueeze(1).expand(
                 -1, self.cfg.env.his_len, -1
             )
             self.goal_hist[reset_ids] = self.goal_local_pos[reset_ids].unsqueeze(1).expand(
@@ -750,6 +759,10 @@ class LeggedRobotPos(LeggedRobot):
             self.rays_hist[rolling_ids] = torch.cat((
                 self.rays_hist[rolling_ids, 1:],
                 self.rays_rand[rolling_ids].unsqueeze(1),
+            ), dim=1)
+            self.motion_ego_hist[rolling_ids] = torch.cat((
+                self.motion_ego_hist[rolling_ids, 1:],
+                motion_ego[rolling_ids].unsqueeze(1),
             ), dim=1)
             self.goal_hist[rolling_ids] = torch.cat((
                 self.goal_hist[rolling_ids, 1:],

@@ -38,6 +38,10 @@ class Go2PosDynamicCfg(Go2PosRoughCfg):
         static_clearance = 0.1
         max_spawn_attempts = 512
 
+    class motion_estimation:
+        # Counterfactual horizon aligned with the 10 Hz exteroception rate.
+        gt_horizon = 0.1
+
     class replay(Go2PosRoughCfg.replay):
         # The existing replay buffer stores only robot state, not obstacle
         # trajectory history. The dynamic task now rewinds its deterministic
