@@ -131,6 +131,9 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
             dtype=torch.float,
         )
         self.dynamic_obstacle_velocity = torch.zeros_like(self.dynamic_obstacle_start)
+        self.dynamic_obstacle_current_speed_range = torch.zeros(
+            self.num_envs, 2, device=self.device, dtype=torch.float
+        )
         self.dynamic_obstacle_bounds = torch.as_tensor(
             obstacle_cfg.bounds, device=self.device, dtype=torch.float
         )
@@ -165,6 +168,46 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         self._reset_dynamic_obstacles(
             torch.arange(self.num_envs, device=self.device, dtype=torch.long)
         )
+
+    def _get_dynamic_obstacle_speed_range(self):
+        """Return the current curriculum speed range in m/s.
+
+        The curriculum advances with policy steps, not simulator substeps,
+        because obstacle velocities are sampled once per environment reset.
+        Existing trajectories therefore remain deterministic until their
+        next reset/replay.
+        """
+
+        obstacle_cfg = self.cfg.dynamic_obstacles
+        final_min, final_max = [
+            float(value) for value in obstacle_cfg.speed_range
+        ]
+        curriculum_cfg = getattr(obstacle_cfg, 'curriculum', None)
+        if curriculum_cfg is None or not getattr(curriculum_cfg, 'enabled', False):
+            return final_min, final_max
+
+        start_min, start_max = [
+            float(value) for value in curriculum_cfg.speed_start
+        ]
+        curriculum_steps = int(curriculum_cfg.speed_steps)
+        if curriculum_steps < 1:
+            raise ValueError(
+                'dynamic_obstacles.curriculum.speed_steps must be positive'
+            )
+        if not (0.0 <= start_min <= start_max):
+            raise ValueError(
+                'dynamic_obstacles.curriculum.speed_start must satisfy '
+                '0 <= min <= max'
+            )
+        if not (0.0 <= final_min <= final_max):
+            raise ValueError(
+                'dynamic_obstacles.speed_range must satisfy 0 <= min <= max'
+            )
+
+        progress = min(float(self.common_step_counter) / curriculum_steps, 1.0)
+        speed_min = start_min + progress * (final_min - start_min)
+        speed_max = start_max + progress * (final_max - start_max)
+        return speed_min, speed_max
 
     def _get_room_constrained_bounds(self, env_ids):
         """Return obstacle-center bounds that stay inside each room cell.
@@ -353,9 +396,11 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
                     )
                 )
 
-        speed_min, speed_max = [float(value) for value in obstacle_cfg.speed_range]
+        speed_min, speed_max = self._get_dynamic_obstacle_speed_range()
         if speed_min < 0.0 or speed_max < speed_min:
             raise ValueError("dynamic_obstacles.speed_range is invalid")
+        self.dynamic_obstacle_current_speed_range[env_ids, 0] = speed_min
+        self.dynamic_obstacle_current_speed_range[env_ids, 1] = speed_max
         speed = speed_min + torch.rand(
             count, self.num_dynamic_obstacles, 1, device=self.device
         ) * (speed_max - speed_min)

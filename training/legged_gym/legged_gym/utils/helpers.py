@@ -30,6 +30,7 @@
 
 import os
 import copy
+import re
 import torch
 import numpy as np
 import random
@@ -102,21 +103,41 @@ def parse_sim_params(args, cfg):
 
 def get_load_path(root, load_run=-1, checkpoint=-1):
     try:
-        runs = os.listdir(root)
-        #TODO sort by date to handle change of month
-        runs.sort()
-        if 'exported' in runs: runs.remove('exported')
-        last_run = os.path.join(root, runs[-1])
-    except:
+        runs = [
+            run for run in os.listdir(root)
+            if run != 'exported' and os.path.isdir(os.path.join(root, run))
+        ]
+    except OSError:
         raise ValueError("No runs in this directory: " + root)
+
+    if not runs:
+        raise ValueError("No runs in this directory: " + root)
+
     if load_run==-1:
-        load_run = last_run
+        # Evaluation scripts may create empty bookkeeping directories.  Only
+        # consider runs that contain at least one checkpoint when selecting
+        # the latest run automatically.
+        runs_with_models = [
+            run for run in runs
+            if any(
+                re.match(r'^model_\d+\.pt$', filename)
+                for filename in os.listdir(os.path.join(root, run))
+            )
+        ]
+        if not runs_with_models:
+            raise ValueError("No checkpoints found in this directory: " + root)
+        load_run = os.path.join(root, sorted(runs_with_models)[-1])
     else:
         load_run = os.path.join(root, load_run)
 
     if checkpoint==-1:
-        models = [file for file in os.listdir(load_run) if 'model' in file]
-        models.sort(key=lambda m: '{0:0>15}'.format(m))
+        models = [
+            file for file in os.listdir(load_run)
+            if re.match(r'^model_\d+\.pt$', file)
+        ]
+        if not models:
+            raise ValueError("No checkpoints found in run directory: " + load_run)
+        models.sort(key=lambda m: int(re.match(r'^model_(\d+)\.pt$', m).group(1)))
         model = models[-1]
     else:
         model = "model_{}.pt".format(checkpoint) 

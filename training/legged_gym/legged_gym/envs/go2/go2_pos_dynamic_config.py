@@ -22,7 +22,16 @@ class Go2PosDynamicCfg(Go2PosRoughCfg):
         # The room is 10 m wide; using the central 8 m x 7 m region avoids
         # the boundary walls while preventing overly dense initial layouts.
         bounds = [[-4.0, 4.0], [-3.5, 3.5]]
-        speed_range = [0.5, 2.5]
+        # Final curriculum range.  The previous 2.5 m/s upper bound was too
+        # aggressive for the first dynamic-obstacle fine-tuning stage.
+        speed_range = [0.5, 1.5]
+        class curriculum:
+            enabled = True
+            # Start close to the easy diagnostic setting and reach
+            # ``speed_range`` after roughly one 2k-iteration run with the
+            # default 48-step PPO rollout.
+            speed_start = [0.2, 0.5]
+            speed_steps = 50000
         min_robot_distance = 1.2
         min_goal_distance = 0.8
         obstacle_clearance = 0.1
