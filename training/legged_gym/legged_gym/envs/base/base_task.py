@@ -52,9 +52,14 @@ class BaseTask():
         else:
             self.device = 'cpu'
 
-        # graphics device for rendering, -1 for no rendering
+        # graphics device for rendering, -1 for no rendering.  Headless
+        # camera recording is an explicit opt-in; ordinary headless training
+        # keeps the historical no-graphics behavior.
         self.graphics_device_id = self.sim_device_id
-        if self.headless:
+        self.enable_headless_rendering = bool(
+            getattr(cfg.env, 'enable_headless_rendering', False)
+        )
+        if self.headless and not self.enable_headless_rendering:
             self.graphics_device_id = -1
 
         self.num_envs = cfg.env.num_envs
@@ -90,8 +95,13 @@ class BaseTask():
 
         self.extras = {}
 
+        self.camera_handles = []
+        self.camera_properties = None
+
         # create envs, sim and viewer
         self.create_sim()
+        if self.enable_headless_rendering:
+            self._create_headless_camera_sensors()
         self.gym.prepare_sim(self.sim)
 
         # todo: read from config
@@ -107,6 +117,28 @@ class BaseTask():
                 self.viewer, gymapi.KEY_ESCAPE, "QUIT")
             self.gym.subscribe_viewer_keyboard_event(
                 self.viewer, gymapi.KEY_V, "toggle_viewer_sync")
+
+    def _create_headless_camera_sensors(self):
+        """Create camera sensors before ``prepare_sim`` for off-screen use."""
+
+        camera_properties = gymapi.CameraProperties()
+        camera_properties.width = int(
+            getattr(self.cfg.env, 'headless_camera_width', 960)
+        )
+        camera_properties.height = int(
+            getattr(self.cfg.env, 'headless_camera_height', 540)
+        )
+        camera_properties.enable_tensors = True
+        self.camera_properties = camera_properties
+        self.camera_handles = [
+            self.gym.create_camera_sensor(env_handle, camera_properties)
+            for env_handle in self.envs
+        ]
+        if any(handle < 0 for handle in self.camera_handles):
+            raise RuntimeError(
+                'Isaac Gym failed to create a headless camera sensor; '
+                'check graphics_device_id and the graphics driver.'
+            )
 
     def get_observations(self):
         return self.obs_buf

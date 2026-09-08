@@ -55,7 +55,15 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         env_obstacle_indices = []
         for obstacle_id in range(self.num_dynamic_obstacles):
             pose = gymapi.Transform()
-            pose.p = gymapi.Vec3(0.0, 0.0, size[2] * 0.5)
+            # These are staging poses only.  ``_init_buffers`` writes the
+            # sampled trajectory states before the first simulation step, but
+            # Isaac Gym still builds the initial PhysX scene from the poses
+            # supplied here.  Keeping all boxes at the same position creates
+            # an overlapping contact cluster for every environment and can
+            # overflow the GPU contact/solver buffers at larger num_envs.
+            # Separate them vertically until the trajectory state is written.
+            staging_z = size[2] * 0.5 + (obstacle_id + 1) * (size[2] + 1.0)
+            pose.p = gymapi.Vec3(0.0, 0.0, staging_z)
             handle = self.gym.create_actor(
                 env_handle,
                 self.dynamic_obstacle_asset,
@@ -131,17 +139,97 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         if torch.any(self.dynamic_obstacle_bounds[:, 1] <= self.dynamic_obstacle_bounds[:, 0]):
             raise ValueError("dynamic_obstacles.bounds must have positive spans")
         self.dynamic_obstacle_radius = math.sqrt(size[0] ** 2 + size[1] ** 2) * 0.5
+        self.dynamic_obstacle_size = torch.as_tensor(
+            size, device=self.device, dtype=torch.float
+        )
         self.dynamic_obstacle_height = size[2]
+        self.dynamic_obstacle_effective_low = torch.zeros(
+            self.num_envs, 2, device=self.device, dtype=torch.float
+        )
+        self.dynamic_obstacle_effective_high = torch.zeros_like(
+            self.dynamic_obstacle_effective_low
+        )
+        if hasattr(self, 'terrain') and hasattr(self.terrain, 'env_origins'):
+            self.terrain_cell_origins = torch.as_tensor(
+                self.terrain.env_origins, device=self.device, dtype=torch.float
+            )
+        else:
+            self.terrain_cell_origins = None
+        self.dynamic_rays = torch.full_like(
+            self.rays, float(self.cfg.sensors.ray2d.max_dist)
+        )
+        self.dynamic_ray_hit_mask = torch.zeros_like(
+            self.rays, dtype=torch.bool
+        )
 
         self._reset_dynamic_obstacles(
             torch.arange(self.num_envs, device=self.device, dtype=torch.long)
         )
 
+    def _get_room_constrained_bounds(self, env_ids):
+        """Return obstacle-center bounds that stay inside each room cell.
+
+        The configured bounds are expressed relative to ``env_origins`` (the
+        robot spawn frame).  ``env_origins`` is not generally the center of a
+        room, so using the configured range directly can cross a wall.  Clamp
+        it against the terrain cell bounds and reserve half the box size plus
+        the configured static clearance for the obstacle footprint.
+        """
+
+        if self.terrain_cell_origins is None:
+            # Plane/none terrains do not have room cells.  Keep the configured
+            # bounds unchanged in that case.
+            low = self.dynamic_obstacle_bounds[:, 0].view(1, 2).expand(
+                len(env_ids), -1
+            )
+            high = self.dynamic_obstacle_bounds[:, 1].view(1, 2).expand(
+                len(env_ids), -1
+            )
+            return low, high
+
+        terrain_levels = self.terrain_levels[env_ids].to(dtype=torch.long)
+        terrain_types = self.terrain_types[env_ids].to(dtype=torch.long)
+        room_centers = self.terrain_cell_origins[
+            terrain_levels, terrain_types, :2
+        ]
+        room_half_extent = torch.tensor(
+            [self.terrain.env_length * 0.5, self.terrain.env_width * 0.5],
+            device=self.device,
+            dtype=torch.float,
+        )
+        static_clearance = float(
+            getattr(self.cfg.dynamic_obstacles, 'static_clearance', 0.0)
+        )
+        room_margin = self.dynamic_obstacle_size[:2] * 0.5 + static_clearance
+        room_min_local = (
+            room_centers - room_half_extent - self.env_origins[env_ids, :2]
+            + room_margin
+        )
+        room_max_local = (
+            room_centers + room_half_extent - self.env_origins[env_ids, :2]
+            - room_margin
+        )
+        configured_low = self.dynamic_obstacle_bounds[:, 0].view(1, 2)
+        configured_high = self.dynamic_obstacle_bounds[:, 1].view(1, 2)
+        low = torch.maximum(configured_low, room_min_local)
+        high = torch.minimum(configured_high, room_max_local)
+        if torch.any(high <= low):
+            bad_ids = env_ids[(high <= low).any(dim=1)]
+            raise RuntimeError(
+                'Dynamic obstacle bounds have no room-safe area for envs {}'.format(
+                    bad_ids.detach().cpu().tolist()
+                )
+            )
+        return low, high
+
     def _sample_dynamic_obstacles(self, env_ids):
         obstacle_cfg = self.cfg.dynamic_obstacles
         count = len(env_ids)
-        low = self.dynamic_obstacle_bounds[:, 0].view(1, 1, 2)
-        high = self.dynamic_obstacle_bounds[:, 1].view(1, 1, 2)
+        effective_low, effective_high = self._get_room_constrained_bounds(env_ids)
+        self.dynamic_obstacle_effective_low[env_ids] = effective_low
+        self.dynamic_obstacle_effective_high[env_ids] = effective_high
+        low = effective_low.view(count, 1, 2)
+        high = effective_high.view(count, 1, 2)
         span = high - low
 
         robot_local = (
@@ -150,25 +238,120 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         goal_local = (
             self.position_targets[env_ids, :2] - self.env_origins[env_ids, :2]
         ).unsqueeze(1)
-        starts = low + torch.rand(
-            count,
-            self.num_dynamic_obstacles,
-            2,
-            device=self.device,
-        ) * span
         min_robot_distance = float(obstacle_cfg.min_robot_distance)
         min_goal_distance = float(obstacle_cfg.min_goal_distance)
-        for _ in range(8):
-            valid = (torch.linalg.vector_norm(starts - robot_local, dim=-1) > min_robot_distance).all(dim=1)
-            valid &= (torch.linalg.vector_norm(starts - goal_local, dim=-1) > min_goal_distance).all(dim=1)
-            invalid = ~valid
-            if not invalid.any():
-                break
-            starts[invalid] = low + torch.rand(
-                int(invalid.sum()) * self.num_dynamic_obstacles,
+        obstacle_clearance = float(getattr(obstacle_cfg, 'obstacle_clearance', 0.0))
+        static_clearance = float(getattr(obstacle_cfg, 'static_clearance', 0.0))
+        max_attempts = int(getattr(obstacle_cfg, 'max_spawn_attempts', 128))
+        if max_attempts < 1:
+            raise ValueError('dynamic_obstacles.max_spawn_attempts must be positive')
+
+        obstacle_size = self.dynamic_obstacle_size[:2].view(1, 1, 2)
+
+        def sample(count_to_sample):
+            return low + torch.rand(
+                count_to_sample,
+                self.num_dynamic_obstacles,
                 2,
                 device=self.device,
-            ).view(int(invalid.sum()), self.num_dynamic_obstacles, 2) * span
+            ) * span
+
+        def static_free(candidate_starts, candidate_env_ids):
+            """Check the terrain height map under each box footprint."""
+
+            if self.height_samples is None:
+                return torch.ones(
+                    candidate_starts.shape[:2], dtype=torch.bool, device=self.device
+                )
+
+            resolution = float(self.cfg.terrain.horizontal_scale)
+            half_extent = torch.ceil(
+                (obstacle_size + static_clearance) / (2.0 * resolution)
+            ).to(dtype=torch.long)
+            offsets_x = torch.arange(
+                -int(half_extent[0, 0, 0]),
+                int(half_extent[0, 0, 0]) + 1,
+                device=self.device,
+                dtype=torch.long,
+            )
+            offsets_y = torch.arange(
+                -int(half_extent[0, 0, 1]),
+                int(half_extent[0, 0, 1]) + 1,
+                device=self.device,
+                dtype=torch.long,
+            )
+            offset_x, offset_y = torch.meshgrid(offsets_x, offsets_y, indexing='ij')
+            offsets = torch.stack((offset_x.flatten(), offset_y.flatten()), dim=-1)
+
+            world_xy = self.env_origins[candidate_env_ids, None, :2] + candidate_starts
+            grid_xy = torch.floor(
+                (world_xy + float(self.cfg.terrain.border_size)) / resolution
+            ).to(dtype=torch.long)
+            grid_xy = grid_xy.unsqueeze(2) + offsets.view(1, 1, -1, 2)
+            in_bounds = (
+                (grid_xy[..., 0] >= 0)
+                & (grid_xy[..., 0] < self.height_samples.shape[0])
+                & (grid_xy[..., 1] >= 0)
+                & (grid_xy[..., 1] < self.height_samples.shape[1])
+            )
+            safe_grid_xy = torch.stack(
+                (
+                    grid_xy[..., 0].clamp(0, self.height_samples.shape[0] - 1),
+                    grid_xy[..., 1].clamp(0, self.height_samples.shape[1] - 1),
+                ),
+                dim=-1,
+            )
+            heights = self.height_samples[
+                safe_grid_xy[..., 0], safe_grid_xy[..., 1]
+            ]
+            # Keep one validity flag per environment and obstacle.  The
+            # caller then requires every obstacle in that environment to be
+            # valid; reducing both dimensions here would lose that axis.
+            return (in_bounds & (heights <= 0.1)).all(dim=-1)
+
+        # Place obstacles one at a time.  Rejecting an entire six-obstacle
+        # layout at once has a very low acceptance rate in a room of this
+        # size, even when a valid layout exists.  Sequential placement keeps
+        # already accepted obstacles and only resamples the current one.
+        starts = torch.empty(
+            count, self.num_dynamic_obstacles, 2, device=self.device
+        )
+        obstacle_x_clearance = float(self.dynamic_obstacle_size[0]) + obstacle_clearance
+        obstacle_y_clearance = float(self.dynamic_obstacle_size[1]) + obstacle_clearance
+        for obstacle_id in range(self.num_dynamic_obstacles):
+            placed_current = torch.zeros(count, dtype=torch.bool, device=self.device)
+            for _ in range(max_attempts):
+                unresolved = ~placed_current
+                if not unresolved.any():
+                    break
+                candidate = sample(count)[:, 0, :]
+                valid = (
+                    torch.linalg.vector_norm(candidate - robot_local[:, 0, :], dim=-1)
+                    > min_robot_distance
+                )
+                valid &= (
+                    torch.linalg.vector_norm(candidate - goal_local[:, 0, :], dim=-1)
+                    > min_goal_distance
+                )
+                candidate_for_static = candidate.unsqueeze(1)
+                valid &= static_free(candidate_for_static, env_ids)[:, 0]
+                if obstacle_id > 0:
+                    delta = candidate[:, None, :] - starts[:, :obstacle_id, :]
+                    valid &= ~(
+                        (delta[..., 0].abs() < obstacle_x_clearance)
+                        & (delta[..., 1].abs() < obstacle_y_clearance)
+                    ).any(dim=1)
+                accepted = unresolved & valid
+                starts[accepted, obstacle_id] = candidate[accepted]
+                placed_current |= accepted
+            if not placed_current.all():
+                failed = int((~placed_current).sum())
+                raise RuntimeError(
+                    'Unable to place dynamic obstacle {} for {} environments '
+                    'after {} attempts'.format(
+                        obstacle_id, failed, max_attempts
+                    )
+                )
 
         speed_min, speed_max = [float(value) for value in obstacle_cfg.speed_range]
         if speed_min < 0.0 or speed_max < speed_min:
@@ -188,8 +371,8 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
     def _write_dynamic_obstacle_states_at_time(self, env_ids=None, time_override=None):
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
-        low = self.dynamic_obstacle_bounds[:, 0].view(1, 1, 2)
-        high = self.dynamic_obstacle_bounds[:, 1].view(1, 1, 2)
+        low = self.dynamic_obstacle_effective_low[env_ids].view(-1, 1, 2)
+        high = self.dynamic_obstacle_effective_high[env_ids].view(-1, 1, 2)
         span = high - low
         if time_override is None:
             time = self.dynamic_obstacle_time[env_ids].view(-1, 1, 1)
@@ -201,13 +384,17 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         direction = torch.where(phase <= span, 1.0, -1.0)
         velocity = self.dynamic_obstacle_velocity[env_ids] * direction
 
-        states = self.dynamic_obstacle_states[env_ids]
-        states[..., 0:2] = self.env_origins[env_ids, None, 0:2] + reflected
-        states[..., 2] = self.dynamic_obstacle_height * 0.5
-        states[..., 3:7] = 0.0
-        states[..., 6] = 1.0
-        states[..., 7:9] = velocity
-        states[..., 9:13] = 0.0
+        # ``tensor[env_ids]`` is an advanced-indexing copy in PyTorch.  Assign
+        # directly to the original tensor so the values are written back to
+        # the simulator root-state buffer.
+        self.dynamic_obstacle_states[env_ids, :, 0:2] = (
+            self.env_origins[env_ids, None, 0:2] + reflected
+        )
+        self.dynamic_obstacle_states[env_ids, :, 2] = self.dynamic_obstacle_height * 0.5
+        self.dynamic_obstacle_states[env_ids, :, 3:7] = 0.0
+        self.dynamic_obstacle_states[env_ids, :, 6] = 1.0
+        self.dynamic_obstacle_states[env_ids, :, 7:9] = velocity
+        self.dynamic_obstacle_states[env_ids, :, 9:13] = 0.0
 
     def _set_dynamic_obstacle_states_in_sim(self, env_ids=None):
         if env_ids is None:
@@ -308,7 +495,47 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
             near,
             torch.full_like(near, float(self.cfg.sensors.ray2d.max_dist)),
         ).amin(dim=1)
+        self.dynamic_rays = dynamic_rays
+        self.dynamic_ray_hit_mask = valid.any(dim=1)
         self.rays = torch.minimum(self.rays, dynamic_rays)
+
+    def get_dynamic_obstacle_gt(self, relative_to_robot=False):
+        """Return simulator ground truth for dynamic obstacles.
+
+        The returned dictionary is intentionally separate from the actor
+        observation.  It can be used by validators, privileged critics, or
+        future teacher policies without changing the current checkpoint input
+        layout.
+
+        Returns:
+            position: ``[num_envs, num_obstacles, 3]`` world or robot-relative
+                obstacle centers.
+            velocity: ``[num_envs, num_obstacles, 3]`` world-frame velocity.
+            size: ``[num_envs, num_obstacles, 3]`` box dimensions ``[x,y,z]``.
+            radius: ``[num_envs, num_obstacles, 1]`` horizontal bounding-circle
+                radius used by the analytic ray query.
+            actor_indices: simulator-domain actor indices.
+        """
+        position = self.dynamic_obstacle_states[..., 0:3].clone()
+        if relative_to_robot:
+            position[..., :2] -= self.root_states[:, None, :2]
+        velocity = self.dynamic_obstacle_states[..., 7:10].clone()
+        size = self.dynamic_obstacle_size.view(1, 1, 3).expand(
+            self.num_envs, self.num_dynamic_obstacles, -1
+        )
+        radius = torch.full(
+            (self.num_envs, self.num_dynamic_obstacles, 1),
+            float(self.dynamic_obstacle_radius),
+            device=self.device,
+            dtype=self.dynamic_obstacle_states.dtype,
+        )
+        return {
+            'position': position,
+            'velocity': velocity,
+            'size': size,
+            'radius': radius,
+            'actor_indices': self.dynamic_obstacle_actor_indices,
+        }
 
     def reset_idx(self, env_ids):
         super().reset_idx(env_ids)

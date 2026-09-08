@@ -18,10 +18,16 @@ class Go2PosDynamicCfg(Go2PosRoughCfg):
         size = [0.6, 0.6, 1.0]
         density = 1000.0
         mass = 50.0
-        bounds = [[-2.5, 2.5], [-2.0, 2.0]]
+        # Leave enough free area for six boxes plus the robot/goal clearance.
+        # The room is 10 m wide; using the central 8 m x 7 m region avoids
+        # the boundary walls while preventing overly dense initial layouts.
+        bounds = [[-4.0, 4.0], [-3.5, 3.5]]
         speed_range = [0.5, 2.5]
         min_robot_distance = 1.2
         min_goal_distance = 0.8
+        obstacle_clearance = 0.1
+        static_clearance = 0.1
+        max_spawn_attempts = 512
 
     class replay(Go2PosRoughCfg.replay):
         # The existing replay buffer stores only robot state, not obstacle

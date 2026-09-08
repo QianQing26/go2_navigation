@@ -41,6 +41,12 @@ cd training/legged_gym && pip install -e .
 
 ## Usage
 
+### Task documentation
+
+The purpose and training relationship of each registered task are documented in
+the [task guide](TASKS.md). In particular, `go2_pos_rough` is the static
+baseline and `go2_pos_dynamic` is the dynamic-obstacle fine-tuning task.
+
 ### Training
 To start training in headless mode:
 ```bash
@@ -81,7 +87,9 @@ The first-stage dynamic-obstacle navigation task is registered separately as
 `go2_pos_dynamic`, so `go2_pos_rough` is unchanged. It uses the same
 navigation observation layout, adds six gravity-free linearly moving box
 actors per environment, and fuses their analytic ray intersections with the
-existing terrain rays. Run it with:
+existing terrain rays. The navigation control/proprioception loop runs at
+50 Hz, while the exteroceptive ray/goal history is updated at 10 Hz. Run it
+with:
 
 ```bash
 python training/legged_gym/legged_gym/scripts/train.py --task go2_pos_dynamic
@@ -99,6 +107,25 @@ The test uses a flat terrain mesh and does not alter `go2_pos_rough`. Add
 `--controller torchscript` (or another registered name) to override the
 controller configured by the task, `--headless` for a non-visual run, or
 adjust each phase with `--phase_steps N`.
+
+### Dynamic-obstacle validation
+
+Before training `go2_pos_dynamic`, the three core simulator links can be
+checked without loading a navigation PPO policy:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python \
+training/legged_gym/legged_gym/scripts/validate_dynamic_obstacles.py \
+--mode all --headless --steps 10 --print-every 5
+```
+
+Use `--mode rays` without `--headless` to open the Isaac Gym viewer and draw
+all 41 rays. `--mode gt` prints dynamic obstacle world position, velocity,
+box size, ray-query radius, and simulator actor indices. `--mode collision`
+places one obstacle at the robot base and checks contact force, collision
+penalty, and termination state. The GT interface is also available as
+`env.get_dynamic_obstacle_gt(relative_to_robot=False)` for a future privileged
+critic or teacher policy; it is not appended to the current PPO observation.
 
 ---
 

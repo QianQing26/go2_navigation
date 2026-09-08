@@ -193,8 +193,8 @@ def main():
     base_col = n // 2
     r =(n // 2.0)
     
-    theta_start = - np.pi/2
-    theta_end = np.pi/2 + 0.0001
+    theta_start = - 2 * np.pi/3
+    theta_end = 2 * np.pi/3 + 0.0001
     theta_step = np.pi/30
     angles_deg = torch.arange(start=theta_start, end=theta_end, 
                                                 step=theta_step, device=device)

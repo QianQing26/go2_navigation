@@ -61,6 +61,9 @@ class LeggedRobotPos(LeggedRobot):
         # Additionally initialize timer_left
         self.obs_history_buf = torch.zeros(
                 self.num_envs, self.cfg.env.his_len, self.cfg.env.num_obs_one_step, device=self.device, dtype=torch.float)  
+        self.exteroception_step_buf = torch.zeros(
+                self.num_envs, device=self.device, dtype=torch.long)
+        self.exteroception_update_interval = self._get_exteroception_update_interval()
         self.actions_orig = self.actions.clone()
 
         # Replay and Collision History Init
@@ -101,7 +104,8 @@ class LeggedRobotPos(LeggedRobot):
 
         self.goal_local_pos = torch.zeros(self.num_envs, 2, device=self.device, requires_grad=False)
         
-        # Ray angles in radians: -pi/2 to pi/2, step pi/30 (6 degrees), total 41 rays
+        # Ray angles in radians: -2pi/3 to 2pi/3 (-120 to 120 degrees),
+        # step pi/30 (6 degrees), total 41 rays.
         self.ray_angles = torch.arange(start=self.cfg.sensors.ray2d.theta_start, end=self.cfg.sensors.ray2d.theta_end, 
                                                 step=self.cfg.sensors.ray2d.theta_step, device=self.device)
         self.rays = torch.ones(self.num_envs, self.ray_angles.shape[0], dtype=torch.float, device=self.device, requires_grad=False) * 5.0
@@ -116,6 +120,25 @@ class LeggedRobotPos(LeggedRobot):
         self.stay_timer = torch.zeros(self.num_envs, device=self.device, dtype=torch.int) 
         self.goal_reached_flag = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)  
         self.stand_still_flag = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+
+    def _get_exteroception_update_interval(self):
+        """Return the number of policy steps between exteroceptive samples."""
+        frequency = float(getattr(self.cfg.env, 'exteroception_frequency', 50.0))
+        if frequency <= 0.0:
+            raise ValueError('env.exteroception_frequency must be positive')
+        interval = int(round(1.0 / (frequency * self.dt)))
+        if interval < 1:
+            raise ValueError(
+                'env.exteroception_frequency cannot exceed the policy frequency '
+                '(dt={:.6f}s, requested={:.3f}Hz)'.format(self.dt, frequency)
+            )
+        actual_frequency = 1.0 / (interval * self.dt)
+        if abs(actual_frequency - frequency) > 1e-4:
+            raise ValueError(
+                'env.exteroception_frequency={:.3f}Hz is not an integer divisor '
+                'of the policy frequency (dt={:.6f}s)'.format(frequency, self.dt)
+            )
+        return interval
 
     def _init_replay_buffers(self):
         """ Initialize buffers for state replay and collision tracking. """
@@ -418,6 +441,7 @@ class LeggedRobotPos(LeggedRobot):
         self.feet_air_time[env_ids] = 0.
         self.episode_length_buf[env_ids] = 0
         self.obs_history_buf[env_ids, :, :] = 0.
+        self.exteroception_step_buf[env_ids] = 0
         self.rays_hist[env_ids, :, :] = 5.
         self.pos_hist[env_ids, :, :] = 0.
         self.goal_hist[env_ids, :, :] = 0.
@@ -600,7 +624,12 @@ class LeggedRobotPos(LeggedRobot):
         
         self.reset_buf = self.terminate_buf.clone() # Death always causes reset
         # Hard Force Reset (e.g., getting squashed/glitched)
-        self.reset_buf |= torch.any(torch.norm(self.contact_forces[:, :, :2], dim=-1) > 50.0, dim=1)
+        # Auxiliary actors (for example dynamic obstacles) are appended to
+        # the rigid-body contact tensor.  Their contacts must not terminate
+        # the robot environment; only the robot's own bodies can indicate
+        # that the robot was squashed or physically corrupted.
+        robot_contact_forces = self.contact_forces[:, :self.num_bodies, :2]
+        self.reset_buf |= torch.any(torch.norm(robot_contact_forces, dim=-1) > 50.0, dim=1)
 
         # Spawn-in-obstacle detection
         if self.initial_.any():
@@ -682,27 +711,60 @@ class LeggedRobotPos(LeggedRobot):
             self.episode_sums["termination"] += rew
 
     def _get_perception(self):
-        """ Resample navigation commands when camera message is ready (simulate real delay).
+        """Update asynchronous exteroception and build the delayed sample.
+
+        The policy still runs at the control frequency (50 Hz), but the
+        exteroceptive sensor/history is sampled at ``env.exteroception_frequency``
+        (10 Hz for Go2).  The history therefore advances only every five policy
+        steps.  Between sensor updates, the current proprioception is refreshed
+        in the newest fused history frame while the ray/goal history remains
+        unchanged.
         """
-        self.rays_rand = self.rays.clone() + torch.rand_like(self.rays) * 0.0
-        self.rays_hist = torch.where(
-            (self.episode_length_buf <= 1)[:, None, None],
-            torch.stack([self.rays_rand] * self.cfg.env.his_len, dim=1),
-            torch.cat([
-                self.rays_hist[:, 1:],
-                self.rays_rand.unsqueeze(1)
-            ], dim=1)
-        )
         pos_diff = self.position_targets - self.root_states[:, 0:3]
         self.goal_local_pos = quat_rotate_inverse(yaw_quat(self.base_quat), pos_diff)[:, :2]
-        self.goal_hist = torch.where(
-            (self.episode_length_buf <= 1)[:, None, None],
-            torch.stack([self.goal_local_pos] * self.cfg.env.his_len, dim=1),
-            torch.cat([
-                self.goal_hist[:, 1:],
-                self.goal_local_pos.unsqueeze(1)
-            ], dim=1)
-        )
+
+        is_new_episode = self.episode_length_buf <= 1
+        self.exteroception_step_buf[is_new_episode] = 0
+        self.exteroception_step_buf += 1
+        update_ids = (
+            is_new_episode
+            | (self.exteroception_step_buf >= self.exteroception_update_interval)
+        ).nonzero(as_tuple=False).flatten()
+        if len(update_ids) == 0:
+            return update_ids
+
+        self.exteroception_step_buf[update_ids] = 0
+        self.rays_rand = self.rays.clone() + torch.rand_like(self.rays) * 0.0
+        reset_ids = update_ids[is_new_episode[update_ids]]
+        rolling_ids = update_ids[~is_new_episode[update_ids]]
+
+        if len(reset_ids) > 0:
+            self.rays_hist[reset_ids] = self.rays_rand[reset_ids].unsqueeze(1).expand(
+                -1, self.cfg.env.his_len, -1
+            )
+            self.goal_hist[reset_ids] = self.goal_local_pos[reset_ids].unsqueeze(1).expand(
+                -1, self.cfg.env.his_len, -1
+            )
+
+        if len(rolling_ids) > 0:
+            self.rays_hist[rolling_ids] = torch.cat((
+                self.rays_hist[rolling_ids, 1:],
+                self.rays_rand[rolling_ids].unsqueeze(1),
+            ), dim=1)
+            self.goal_hist[rolling_ids] = torch.cat((
+                self.goal_hist[rolling_ids, 1:],
+                self.goal_local_pos[rolling_ids].unsqueeze(1),
+            ), dim=1)
+
+        # commands.delay_time is expressed in seconds.  Since the history is
+        # now sampled at the sensor rate, select the corresponding old sensor
+        # frame instead of using a 50 Hz frame index.
+        delay_time = float(getattr(self.cfg.commands, 'delay_time', 0.0))
+        delay_frames = max(0, int(round(delay_time * self.cfg.env.exteroception_frequency)))
+        delay_index = -min(self.cfg.env.his_len, delay_frames + 1)
+        self.delay_rays[update_ids] = self.rays_hist[update_ids, delay_index, :]
+        self.delay_goal[update_ids] = self.goal_hist[update_ids, delay_index, :]
+        return update_ids
 
     def compute_observations(self):
         """ Computes observations
@@ -727,13 +789,7 @@ class LeggedRobotPos(LeggedRobot):
         if self.cfg.noise.add_noise:
             self.prop_buf += (2 * torch.rand_like(self.prop_buf) - 1) * noise_vec.to(self.device)
 
-        self._get_perception()
-
-        env_ids = (self.episode_length_buf % int(self.cfg.commands.delay_time / self.dt)==0).nonzero(as_tuple=False).flatten()
-        if len(env_ids) != 0:
-            resample_time_idx = -torch.randint(2, 4, (len(env_ids),), device=self.device) -1 # simulate a small random delay
-            self.delay_rays[env_ids] = self.rays_hist[env_ids, resample_time_idx, :]
-            self.delay_goal[env_ids] = self.goal_hist[env_ids, resample_time_idx, :]
+        exteroception_update_ids = self._get_perception()
         
         env_ids = (self.episode_length_buf % 10 == 0).nonzero(as_tuple=False).flatten()
         self.pos_hist[env_ids] = torch.where(
@@ -751,14 +807,26 @@ class LeggedRobotPos(LeggedRobot):
                             self.delay_goal, # 2
                             ), dim=-1)
 
-        self.obs_history_buf = torch.where(
-            (self.episode_length_buf <= 1)[:, None, None],
-            torch.stack([obs_buf] * self.cfg.env.his_len, dim=1),
-            torch.cat([
-                self.obs_history_buf[:, 1:],
-                obs_buf.unsqueeze(1)
-            ], dim=1)
-        )  
+        is_new_episode = self.episode_length_buf <= 1
+        reset_ids = is_new_episode.nonzero(as_tuple=False).flatten()
+        if len(reset_ids) > 0:
+            self.obs_history_buf[reset_ids] = obs_buf[reset_ids].unsqueeze(1).expand(
+                -1, self.cfg.env.his_len, -1
+            )
+
+        rolling_ids = exteroception_update_ids[~is_new_episode[exteroception_update_ids]]
+        if len(rolling_ids) > 0:
+            self.obs_history_buf[rolling_ids] = torch.cat((
+                self.obs_history_buf[rolling_ids, 1:],
+                obs_buf[rolling_ids].unsqueeze(1),
+            ), dim=1)
+
+        # Proprioception is available at 50 Hz.  Keep the newest fused frame
+        # current even when the exteroceptive history does not advance.
+        non_update_ids = (~is_new_episode).nonzero(as_tuple=False).flatten()
+        if len(non_update_ids) > 0:
+            self.obs_history_buf[non_update_ids, -1, :self.cfg.env.num_props] = \
+                self.prop_buf[non_update_ids]
 
         self.obs_buf = self.obs_history_buf.view(self.num_envs, -1)
         

@@ -70,6 +70,10 @@ class Go2PosRoughCfg( LeggedRobotPosCfg ):
         num_goal_obs = 2 # target x,y
         num_obs_one_step = num_props + num_rays + num_goal_obs
         num_observations = num_obs_one_step * his_len 
+        # The policy/control loop runs at 50 Hz while the exteroceptive sensor
+        # history is sampled at 10 Hz (one new frame every five policy steps).
+        proprioception_frequency = 50.0
+        exteroception_frequency = 10.0
         num_envs = 2048
         episode_length_s = 60 # episode length in seconds
         debug_viz = True

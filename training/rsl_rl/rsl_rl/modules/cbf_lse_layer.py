@@ -6,7 +6,7 @@ import numpy as np
 class ExactLSECBFLayer(nn.Module):
     def __init__(self,
                  num_rays=41,
-                 fov_deg=180.0,
+                 fov_deg=240.0,
                  safe_radius=0.15,
                  safety_margin=0.05,
                  kappa=10.0,
