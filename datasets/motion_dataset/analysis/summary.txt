@@ -1,0 +1,13 @@
+Motion dataset analysis
+=======================
+samples: 10000
+cGT mean/std: -0.007503 / 1.396518 m/s
+cGT min/max: -28.940044 / 28.086559 m/s
+P(c > eps): 0.1138
+P(c < -eps): 0.1095
+P(|c| <= eps): 0.7766
+switching ray ratio: 0.0112
+top-1%% extreme switching ratio: 0.8698
+sensor frame check: {'checked': True, 'expected_policy_step_interval': 5, 'num_trajectory_groups': 522, 'num_interval_violations': 0, 'min_policy_step_delta': 5, 'median_policy_step_delta': 5.0}
+split check: {'checked': True, 'episode_counts': {'train': 408, 'val': 68, 'test': 46}, 'sample_counts': {'train': 7781, 'val': 1335, 'test': 884}}
+raw clipping fractions: {'2.0': 0.010539024136960506, '5.0': 0.008834145963191986, '10.0': 0.0059585366398096085, '20.0': 0.0014634146355092525}

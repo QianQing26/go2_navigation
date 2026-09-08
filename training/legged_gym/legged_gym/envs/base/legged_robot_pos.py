@@ -62,8 +62,12 @@ class LeggedRobotPos(LeggedRobot):
         self.obs_history_buf = torch.zeros(
                 self.num_envs, self.cfg.env.his_len, self.cfg.env.num_obs_one_step, device=self.device, dtype=torch.float)  
         self.exteroception_step_buf = torch.zeros(
-                self.num_envs, device=self.device, dtype=torch.long)
+            self.num_envs, device=self.device, dtype=torch.long)
         self.exteroception_update_interval = self._get_exteroception_update_interval()
+        self.exteroception_updated_mask = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.bool)
+        self.exteroception_history_count = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.long)
         self.actions_orig = self.actions.clone()
 
         # Replay and Collision History Init
@@ -444,6 +448,8 @@ class LeggedRobotPos(LeggedRobot):
         self.episode_length_buf[env_ids] = 0
         self.obs_history_buf[env_ids, :, :] = 0.
         self.exteroception_step_buf[env_ids] = 0
+        self.exteroception_updated_mask[env_ids] = False
+        self.exteroception_history_count[env_ids] = 0
         self.rays_hist[env_ids, :, :] = 5.
         self.motion_ego_hist[env_ids, :, :] = 0.
         self.pos_hist[env_ids, :, :] = 0.
@@ -723,11 +729,17 @@ class LeggedRobotPos(LeggedRobot):
         in the newest fused history frame while the ray/goal history remains
         unchanged.
         """
+        self.exteroception_updated_mask[:] = False
         pos_diff = self.position_targets - self.root_states[:, 0:3]
         self.goal_local_pos = quat_rotate_inverse(yaw_quat(self.base_quat), pos_diff)[:, :2]
 
         is_new_episode = self.episode_length_buf <= 1
         self.exteroception_step_buf[is_new_episode] = 0
+        # The existing history path reinitializes on both early episode
+        # frames (``episode_length_buf <= 1``). Keep the diagnostic count
+        # aligned with that behavior instead of counting an initialization
+        # frame twice as a mature temporal sample.
+        self.exteroception_history_count[is_new_episode] = 0
         self.exteroception_step_buf += 1
         update_ids = (
             is_new_episode
@@ -737,6 +749,11 @@ class LeggedRobotPos(LeggedRobot):
             return update_ids
 
         self.exteroception_step_buf[update_ids] = 0
+        self.exteroception_updated_mask[update_ids] = True
+        self.exteroception_history_count[update_ids] = torch.clamp(
+            self.exteroception_history_count[update_ids] + 1,
+            max=self.cfg.env.his_len,
+        )
         self.rays_rand = self.rays.clone() + torch.rand_like(self.rays) * 0.0
         motion_ego = torch.cat((
             self.base_lin_vel[:, :2], self.base_ang_vel[:, 2:3]

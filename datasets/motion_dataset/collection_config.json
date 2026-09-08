@@ -1,0 +1,10 @@
+{
+  "policy_path": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/Go2_pos_rough/09_05_17-40-15_exteroception_modified/model_2000.pt",
+  "num_envs": 512,
+  "max_samples": 200000,
+  "max_policy_steps": 1000000,
+  "shard_size": 10000,
+  "seed": 1,
+  "headless": true,
+  "include_warmup": false
+}

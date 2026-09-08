@@ -1,0 +1,668 @@
+{
+  "dataset_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/datasets/motion_dataset",
+  "num_shards_loaded": 1,
+  "num_samples": 10000,
+  "num_ray_values": 410000,
+  "overall": {
+    "count": 410000,
+    "mean": -0.007503433618694544,
+    "std": 1.3965184688568115,
+    "min": -28.940044403076172,
+    "max": 28.086559295654297,
+    "median": 0.0,
+    "p90": 0.11678937077522278,
+    "p95": 0.3079468607902527,
+    "p99": 0.6974649429321289,
+    "p99_5": 1.6724467277526855,
+    "p99_9": 18.831993103027344
+  },
+  "absolute_value_distribution": {
+    "count": 410000,
+    "mean": 0.19268271327018738,
+    "std": 1.383182406425476,
+    "min": 0.0,
+    "max": 28.940044403076172,
+    "median": 0.0,
+    "p90": 0.30733174085617065,
+    "p95": 0.44464409351348877,
+    "p99": 2.9134397506713867,
+    "p99_5": 11.595743179321289,
+    "p99_9": 21.42399024963379
+  },
+  "sign_ratios": {
+    "epsilon": 0.05,
+    "positive_ratio": 0.11382682926829268,
+    "negative_ratio": 0.10952439024390244,
+    "near_zero_ratio": 0.7766487804878048
+  },
+  "per_angle": {
+    "angles_deg": [
+      -120.00000762939453,
+      -114.00000762939453,
+      -108.00000762939453,
+      -102.00000762939453,
+      -96.0,
+      -90.0,
+      -84.0,
+      -78.0,
+      -72.0,
+      -66.0,
+      -60.000003814697266,
+      -54.000003814697266,
+      -48.0,
+      -42.0,
+      -36.0,
+      -30.000001907348633,
+      -24.0,
+      -18.0,
+      -12.0,
+      -6.0,
+      0.0,
+      6.0,
+      12.0,
+      18.0,
+      24.0,
+      30.000001907348633,
+      36.0,
+      42.0,
+      48.0,
+      54.000003814697266,
+      60.000003814697266,
+      66.0,
+      72.0,
+      78.0,
+      84.0,
+      90.0,
+      96.0,
+      102.00000762939453,
+      108.00000762939453,
+      114.00000762939453,
+      120.00000762939453
+    ],
+    "statistics": [
+      {
+        "ray_index": 0,
+        "nonzero_rate": 0.15970000624656677,
+        "positive_rate": 0.08739999681711197,
+        "negative_rate": 0.0723000019788742,
+        "mean_positive_closing_rate": 0.8588204383850098,
+        "p95_abs": 0.3758228123188019
+      },
+      {
+        "ray_index": 1,
+        "nonzero_rate": 0.16740000247955322,
+        "positive_rate": 0.08860000222921371,
+        "negative_rate": 0.07880000025033951,
+        "mean_positive_closing_rate": 0.9656726121902466,
+        "p95_abs": 0.3856698274612427
+      },
+      {
+        "ray_index": 2,
+        "nonzero_rate": 0.17820000648498535,
+        "positive_rate": 0.093299999833107,
+        "negative_rate": 0.08489999920129776,
+        "mean_positive_closing_rate": 0.832240641117096,
+        "p95_abs": 0.4047430753707886
+      },
+      {
+        "ray_index": 3,
+        "nonzero_rate": 0.19200000166893005,
+        "positive_rate": 0.10000000149011612,
+        "negative_rate": 0.09200000017881393,
+        "mean_positive_closing_rate": 0.7864702343940735,
+        "p95_abs": 0.417328804731369
+      },
+      {
+        "ray_index": 4,
+        "nonzero_rate": 0.20229999721050262,
+        "positive_rate": 0.10639999806880951,
+        "negative_rate": 0.09589999914169312,
+        "mean_positive_closing_rate": 0.6849052309989929,
+        "p95_abs": 0.41257554292678833
+      },
+      {
+        "ray_index": 5,
+        "nonzero_rate": 0.22050000727176666,
+        "positive_rate": 0.11599999666213989,
+        "negative_rate": 0.10450000315904617,
+        "mean_positive_closing_rate": 0.6751934885978699,
+        "p95_abs": 0.41903889179229736
+      },
+      {
+        "ray_index": 6,
+        "nonzero_rate": 0.2223999947309494,
+        "positive_rate": 0.1143999993801117,
+        "negative_rate": 0.1080000028014183,
+        "mean_positive_closing_rate": 0.7761141657829285,
+        "p95_abs": 0.4445226490497589
+      },
+      {
+        "ray_index": 7,
+        "nonzero_rate": 0.22949999570846558,
+        "positive_rate": 0.11739999800920486,
+        "negative_rate": 0.11209999769926071,
+        "mean_positive_closing_rate": 0.6850645542144775,
+        "p95_abs": 0.4346669018268585
+      },
+      {
+        "ray_index": 8,
+        "nonzero_rate": 0.23520000278949738,
+        "positive_rate": 0.11819999665021896,
+        "negative_rate": 0.11699999868869781,
+        "mean_positive_closing_rate": 0.7718340754508972,
+        "p95_abs": 0.4383162558078766
+      },
+      {
+        "ray_index": 9,
+        "nonzero_rate": 0.24330000579357147,
+        "positive_rate": 0.12240000069141388,
+        "negative_rate": 0.120899997651577,
+        "mean_positive_closing_rate": 0.7015893459320068,
+        "p95_abs": 0.45044150948524475
+      },
+      {
+        "ray_index": 10,
+        "nonzero_rate": 0.24040000140666962,
+        "positive_rate": 0.11999999731779099,
+        "negative_rate": 0.12039999663829803,
+        "mean_positive_closing_rate": 0.5550791621208191,
+        "p95_abs": 0.4502328038215637
+      },
+      {
+        "ray_index": 11,
+        "nonzero_rate": 0.23909999430179596,
+        "positive_rate": 0.12030000239610672,
+        "negative_rate": 0.11879999935626984,
+        "mean_positive_closing_rate": 0.6787769198417664,
+        "p95_abs": 0.4282509982585907
+      },
+      {
+        "ray_index": 12,
+        "nonzero_rate": 0.24289999902248383,
+        "positive_rate": 0.12099999934434891,
+        "negative_rate": 0.12189999967813492,
+        "mean_positive_closing_rate": 0.6595134139060974,
+        "p95_abs": 0.4351419508457184
+      },
+      {
+        "ray_index": 13,
+        "nonzero_rate": 0.24459999799728394,
+        "positive_rate": 0.12039999663829803,
+        "negative_rate": 0.1242000013589859,
+        "mean_positive_closing_rate": 0.7023926377296448,
+        "p95_abs": 0.43916982412338257
+      },
+      {
+        "ray_index": 14,
+        "nonzero_rate": 0.24369999766349792,
+        "positive_rate": 0.12160000205039978,
+        "negative_rate": 0.12210000306367874,
+        "mean_positive_closing_rate": 0.7116533517837524,
+        "p95_abs": 0.4484872817993164
+      },
+      {
+        "ray_index": 15,
+        "nonzero_rate": 0.24449999630451202,
+        "positive_rate": 0.12060000002384186,
+        "negative_rate": 0.12389999628067017,
+        "mean_positive_closing_rate": 0.8794757127761841,
+        "p95_abs": 0.46321186423301697
+      },
+      {
+        "ray_index": 16,
+        "nonzero_rate": 0.23199999332427979,
+        "positive_rate": 0.11500000208616257,
+        "negative_rate": 0.11699999868869781,
+        "mean_positive_closing_rate": 0.8613495230674744,
+        "p95_abs": 0.45558178424835205
+      },
+      {
+        "ray_index": 17,
+        "nonzero_rate": 0.22630000114440918,
+        "positive_rate": 0.11410000175237656,
+        "negative_rate": 0.11219999939203262,
+        "mean_positive_closing_rate": 1.0396456718444824,
+        "p95_abs": 0.45985105633735657
+      },
+      {
+        "ray_index": 18,
+        "nonzero_rate": 0.2198999971151352,
+        "positive_rate": 0.10890000313520432,
+        "negative_rate": 0.11100000143051147,
+        "mean_positive_closing_rate": 0.9230426549911499,
+        "p95_abs": 0.4585968852043152
+      },
+      {
+        "ray_index": 19,
+        "nonzero_rate": 0.20659999549388885,
+        "positive_rate": 0.10010000318288803,
+        "negative_rate": 0.10649999976158142,
+        "mean_positive_closing_rate": 0.9496048092842102,
+        "p95_abs": 0.45214223861694336
+      },
+      {
+        "ray_index": 20,
+        "nonzero_rate": 0.20579999685287476,
+        "positive_rate": 0.09910000115633011,
+        "negative_rate": 0.10670000314712524,
+        "mean_positive_closing_rate": 1.1649631261825562,
+        "p95_abs": 0.4450618624687195
+      },
+      {
+        "ray_index": 21,
+        "nonzero_rate": 0.20589999854564667,
+        "positive_rate": 0.10480000078678131,
+        "negative_rate": 0.10109999775886536,
+        "mean_positive_closing_rate": 0.9953243136405945,
+        "p95_abs": 0.4476313889026642
+      },
+      {
+        "ray_index": 22,
+        "nonzero_rate": 0.21330000460147858,
+        "positive_rate": 0.11270000040531158,
+        "negative_rate": 0.1005999967455864,
+        "mean_positive_closing_rate": 1.187667727470398,
+        "p95_abs": 0.46069076657295227
+      },
+      {
+        "ray_index": 23,
+        "nonzero_rate": 0.22779999673366547,
+        "positive_rate": 0.12110000103712082,
+        "negative_rate": 0.10670000314712524,
+        "mean_positive_closing_rate": 0.9572803378105164,
+        "p95_abs": 0.495177686214447
+      },
+      {
+        "ray_index": 24,
+        "nonzero_rate": 0.23960000276565552,
+        "positive_rate": 0.12700000405311584,
+        "negative_rate": 0.11259999871253967,
+        "mean_positive_closing_rate": 0.6884551048278809,
+        "p95_abs": 0.4679746925830841
+      },
+      {
+        "ray_index": 25,
+        "nonzero_rate": 0.2443999946117401,
+        "positive_rate": 0.1256999969482422,
+        "negative_rate": 0.11869999766349792,
+        "mean_positive_closing_rate": 0.8791009783744812,
+        "p95_abs": 0.46492838859558105
+      },
+      {
+        "ray_index": 26,
+        "nonzero_rate": 0.24629999697208405,
+        "positive_rate": 0.1256999969482422,
+        "negative_rate": 0.12060000002384186,
+        "mean_positive_closing_rate": 0.8808130621910095,
+        "p95_abs": 0.4623195230960846
+      },
+      {
+        "ray_index": 27,
+        "nonzero_rate": 0.2442999929189682,
+        "positive_rate": 0.12049999833106995,
+        "negative_rate": 0.12380000203847885,
+        "mean_positive_closing_rate": 0.8370135426521301,
+        "p95_abs": 0.45415371656417847
+      },
+      {
+        "ray_index": 28,
+        "nonzero_rate": 0.23720000684261322,
+        "positive_rate": 0.11949999630451202,
+        "negative_rate": 0.1177000030875206,
+        "mean_positive_closing_rate": 0.7818094491958618,
+        "p95_abs": 0.4558127522468567
+      },
+      {
+        "ray_index": 29,
+        "nonzero_rate": 0.24480000138282776,
+        "positive_rate": 0.12389999628067017,
+        "negative_rate": 0.120899997651577,
+        "mean_positive_closing_rate": 0.702070951461792,
+        "p95_abs": 0.4632473886013031
+      },
+      {
+        "ray_index": 30,
+        "nonzero_rate": 0.24779999256134033,
+        "positive_rate": 0.12380000203847885,
+        "negative_rate": 0.12399999797344208,
+        "mean_positive_closing_rate": 0.5569154620170593,
+        "p95_abs": 0.464124470949173
+      },
+      {
+        "ray_index": 31,
+        "nonzero_rate": 0.24660000205039978,
+        "positive_rate": 0.12479999661445618,
+        "negative_rate": 0.121799997985363,
+        "mean_positive_closing_rate": 0.6768327355384827,
+        "p95_abs": 0.4571211040019989
+      },
+      {
+        "ray_index": 32,
+        "nonzero_rate": 0.24400000274181366,
+        "positive_rate": 0.12150000035762787,
+        "negative_rate": 0.12250000238418579,
+        "mean_positive_closing_rate": 0.62061607837677,
+        "p95_abs": 0.43823495507240295
+      },
+      {
+        "ray_index": 33,
+        "nonzero_rate": 0.24300000071525574,
+        "positive_rate": 0.12349999696016312,
+        "negative_rate": 0.11949999630451202,
+        "mean_positive_closing_rate": 0.5777845978736877,
+        "p95_abs": 0.4444771111011505
+      },
+      {
+        "ray_index": 34,
+        "nonzero_rate": 0.23199999332427979,
+        "positive_rate": 0.12110000103712082,
+        "negative_rate": 0.11089999973773956,
+        "mean_positive_closing_rate": 0.5942211747169495,
+        "p95_abs": 0.437831312417984
+      },
+      {
+        "ray_index": 35,
+        "nonzero_rate": 0.22939999401569366,
+        "positive_rate": 0.11999999731779099,
+        "negative_rate": 0.10939999669790268,
+        "mean_positive_closing_rate": 0.7675257325172424,
+        "p95_abs": 0.44868332147598267
+      },
+      {
+        "ray_index": 36,
+        "nonzero_rate": 0.2273000031709671,
+        "positive_rate": 0.11810000240802765,
+        "negative_rate": 0.10920000076293945,
+        "mean_positive_closing_rate": 0.939467191696167,
+        "p95_abs": 0.4565766155719757
+      },
+      {
+        "ray_index": 37,
+        "nonzero_rate": 0.21469999849796295,
+        "positive_rate": 0.11240000277757645,
+        "negative_rate": 0.1023000031709671,
+        "mean_positive_closing_rate": 0.9181991815567017,
+        "p95_abs": 0.4443218410015106
+      },
+      {
+        "ray_index": 38,
+        "nonzero_rate": 0.2037999927997589,
+        "positive_rate": 0.10580000281333923,
+        "negative_rate": 0.09799999743700027,
+        "mean_positive_closing_rate": 1.0541369915008545,
+        "p95_abs": 0.4473453760147095
+      },
+      {
+        "ray_index": 39,
+        "nonzero_rate": 0.19050000607967377,
+        "positive_rate": 0.09799999743700027,
+        "negative_rate": 0.0925000011920929,
+        "mean_positive_closing_rate": 1.1325163841247559,
+        "p95_abs": 0.40823957324028015
+      },
+      {
+        "ray_index": 40,
+        "nonzero_rate": 0.17839999496936798,
+        "positive_rate": 0.09179999679327011,
+        "negative_rate": 0.08659999817609787,
+        "mean_positive_closing_rate": 1.0086033344268799,
+        "p95_abs": 0.39797258377075195
+      }
+    ]
+  },
+  "speed_conditioned": {
+    "bin_edges": [
+      0.0,
+      0.5,
+      1.0,
+      1.5,
+      6.748286247253418
+    ],
+    "scene_speed_min": 0.2920849323272705,
+    "scene_speed_max": 6.748286247253418,
+    "bins": [
+      {
+        "low": 0.0,
+        "high": 0.5,
+        "count_samples": 2520,
+        "count_ray_values": 103320,
+        "positive_ratio": 0.12505806982517242,
+        "mean_positive": 0.7904160022735596,
+        "p95_positive": 1.1463063955307007
+      },
+      {
+        "low": 0.5,
+        "high": 1.0,
+        "count_samples": 4274,
+        "count_ray_values": 175234,
+        "positive_ratio": 0.12752662599086761,
+        "mean_positive": 0.7251214385032654,
+        "p95_positive": 1.0315459966659546
+      },
+      {
+        "low": 1.0,
+        "high": 1.5,
+        "count_samples": 2773,
+        "count_ray_values": 113693,
+        "positive_ratio": 0.11805476248264313,
+        "mean_positive": 0.7491176724433899,
+        "p95_positive": 0.9954599738121033
+      },
+      {
+        "low": 1.5,
+        "high": 6.748286247253418,
+        "count_samples": 433,
+        "count_ray_values": 17753,
+        "positive_ratio": 0.11688165366649628,
+        "mean_positive": 0.7179943919181824,
+        "p95_positive": 1.0305938720703125
+      }
+    ]
+  },
+  "boundary_switching": {
+    "source_epsilon": 0.05,
+    "switching_ray_ratio": 0.011190243996679783,
+    "samples_with_switching_ratio": 0.36469998955726624,
+    "switching_distribution": {
+      "count": 4588,
+      "mean": -0.7377761602401733,
+      "std": 12.607014656066895,
+      "min": -28.940044403076172,
+      "max": 28.086559295654297,
+      "median": -0.3194284439086914,
+      "p90": 17.721540451049805,
+      "p95": 21.88888931274414,
+      "p99": 25.35029411315918,
+      "p99_5": 25.98182487487793,
+      "p99_9": 27.153968811035156
+    },
+    "non_switching_distribution": {
+      "count": 405412,
+      "mean": 0.000760976574383676,
+      "std": 0.40934303402900696,
+      "min": -26.172733306884766,
+      "max": 25.63070297241211,
+      "median": 0.0,
+      "p90": 0.09732022881507874,
+      "p95": 0.29053476452827454,
+      "p99": 0.5581144690513611,
+      "p99_5": 0.7260804772377014,
+      "p99_9": 1.3636904954910278
+    },
+    "switching_abs_distribution": {
+      "count": 4588,
+      "mean": 10.244346618652344,
+      "std": 7.38474702835083,
+      "min": 0.050466060638427734,
+      "max": 28.940044403076172,
+      "median": 9.688043594360352,
+      "p90": 21.008926391601562,
+      "p95": 23.070281982421875,
+      "p99": 25.77806854248047,
+      "p99_5": 26.550018310546875,
+      "p99_9": 28.884553909301758
+    },
+    "non_switching_abs_distribution": {
+      "count": 405412,
+      "mean": 0.07892920821905136,
+      "std": 0.401662141084671,
+      "min": 0.0,
+      "max": 26.172733306884766,
+      "median": 0.0,
+      "p90": 0.28858497738838196,
+      "p95": 0.4097956717014313,
+      "p99": 0.730539083480835,
+      "p99_5": 0.947079062461853,
+      "p99_9": 5.081298828125
+    },
+    "top_1_percent_abs_threshold": 2.9134397506713867,
+    "top_1_percent_extreme_count": 4101,
+    "top_1_percent_extreme_switching_ratio": 0.8697878566203365,
+    "current_dynamic_source_ratio": 0.23509755730628967,
+    "future_dynamic_source_ratio": 0.23454146087169647
+  },
+  "raw_gt_clipping_report": {
+    "2.0": 0.010539024136960506,
+    "5.0": 0.008834145963191986,
+    "10.0": 0.0059585366398096085,
+    "20.0": 0.0014634146355092525
+  },
+  "sensor_frame_sampling_check": {
+    "checked": true,
+    "expected_policy_step_interval": 5,
+    "num_trajectory_groups": 522,
+    "num_interval_violations": 0,
+    "min_policy_step_delta": 5,
+    "median_policy_step_delta": 5.0
+  },
+  "split_check": {
+    "checked": true,
+    "episode_counts": {
+      "train": 408,
+      "val": 68,
+      "test": 46
+    },
+    "sample_counts": {
+      "train": 7781,
+      "val": 1335,
+      "test": 884
+    }
+  },
+  "epsilon": 0.05,
+  "manifest": {
+    "task": "go2_pos_dynamic",
+    "total_samples": 10000,
+    "num_shards": 1,
+    "shards": [
+      {
+        "path": "shard_00000.pt",
+        "num_samples": 10000,
+        "file_size_bytes": 29295864
+      }
+    ],
+    "per_sample_shapes": {
+      "rays_hist": [
+        10,
+        41
+      ],
+      "motion_ego_hist": [
+        10,
+        3
+      ],
+      "closing_rate_gt": [
+        41
+      ],
+      "current_fused_rays": [
+        41
+      ],
+      "static_rays": [
+        41
+      ],
+      "dynamic_rays": [
+        41
+      ],
+      "future_fused_rays": [
+        41
+      ],
+      "future_dynamic_rays": [
+        41
+      ]
+    },
+    "policy_path": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/Go2_pos_rough/09_05_17-40-15_exteroception_modified/model_2000.pt",
+    "git_commit": "6df4d1b4c5cc9a12da23ec8b1ecc4c84c697aa24",
+    "seed": 1,
+    "gt_horizon": 0.1,
+    "exteroception_frequency": 10.0,
+    "policy_dt": 0.02,
+    "exteroception_update_interval": 5,
+    "history_length": 10,
+    "ray_angles_deg": [
+      -120.00000762939453,
+      -114.00000762939453,
+      -108.00000762939453,
+      -102.00000762939453,
+      -96.0,
+      -90.0,
+      -84.0,
+      -78.0,
+      -72.0,
+      -66.0,
+      -60.000003814697266,
+      -54.000003814697266,
+      -48.0,
+      -42.0,
+      -36.0,
+      -30.000001907348633,
+      -24.0,
+      -18.0,
+      -12.0,
+      -6.0,
+      0.0,
+      6.0,
+      12.0,
+      18.0,
+      24.0,
+      30.000001907348633,
+      36.0,
+      42.0,
+      48.0,
+      54.000003814697266,
+      60.000003814697266,
+      66.0,
+      72.0,
+      78.0,
+      84.0,
+      90.0,
+      96.0,
+      102.00000762939453,
+      108.00000762939453,
+      114.00000762939453,
+      120.00000762939453
+    ],
+    "obstacle_speed_range": [
+      0.5,
+      1.5
+    ],
+    "obstacle_speed_curriculum": {
+      "enabled": true,
+      "speed_start": [
+        0.2,
+        0.5
+      ],
+      "speed_steps": 50000
+    },
+    "include_warmup": false,
+    "ray_range_semantics": {
+      "raw_dataset_range_checked": [
+        0.0,
+        3.0
+      ],
+      "configured_dynamic_ray_min_dist": 0.1,
+      "below_configured_min_count": 0,
+      "total_ray_value_count": 4100000,
+      "below_configured_min_ratio": 0.0,
+      "note": "Static grid rays are not clamped to min_dist; raw sub-min values are preserved."
+    }
+  },
+  "figures_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/datasets/motion_dataset/analysis/figures"
+}

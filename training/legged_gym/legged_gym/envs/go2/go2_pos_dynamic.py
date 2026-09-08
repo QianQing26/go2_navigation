@@ -171,6 +171,9 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         self.closing_rate_gt_future_fused_rays = torch.full_like(
             self.rays, float(self.cfg.sensors.ray2d.max_dist)
         )
+        self.future_dynamic_rays = torch.full_like(
+            self.rays, float(self.cfg.sensors.ray2d.max_dist)
+        )
         motion_estimation_cfg = getattr(self.cfg, 'motion_estimation', None)
         self.gt_horizon = float(
             getattr(motion_estimation_cfg, 'gt_horizon', 0.1)
@@ -598,6 +601,7 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
             future_position, self.root_states[:, :2], self.base_quat
         )
         future_fused = torch.minimum(static_rays, future_dynamic_rays)
+        self.future_dynamic_rays = future_dynamic_rays
         self.closing_rate_gt = (current_fused - future_fused) / self.gt_horizon
         self.closing_rate_gt_future_fused_rays = future_fused
 
@@ -659,5 +663,8 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         super().reset_idx(env_ids)
         self.closing_rate_gt[env_ids] = 0.0
         self.closing_rate_gt_future_fused_rays[env_ids] = float(
+            self.cfg.sensors.ray2d.max_dist
+        )
+        self.future_dynamic_rays[env_ids] = float(
             self.cfg.sensors.ray2d.max_dist
         )
