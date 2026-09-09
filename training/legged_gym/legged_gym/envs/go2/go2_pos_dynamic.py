@@ -197,6 +197,13 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         self.active_obstacle_radial_velocity_valid_mask = torch.zeros(
             source_shape, device=self.device, dtype=torch.bool
         )
+        self.active_obstacle_geometric_closing_rate_gt = torch.zeros_like(
+            self.rays
+        )
+        self.active_obstacle_geometric_closing_valid_mask = torch.zeros(
+            source_shape, device=self.device, dtype=torch.bool
+        )
+        self.active_obstacle_ray_discriminant_sqrt = torch.zeros_like(self.rays)
         motion_estimation_cfg = getattr(self.cfg, 'motion_estimation', None)
         self.gt_horizon = float(
             getattr(motion_estimation_cfg, 'gt_horizon', 0.1)
@@ -247,6 +254,58 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         speed_min = start_min + progress * (final_min - start_min)
         speed_max = start_max + progress * (final_max - start_max)
         return speed_min, speed_max
+
+    def _get_dynamic_obstacle_speed_ranges(self, env_ids):
+        """Return one sampling interval per environment.
+
+        The optional ``dataset_speed_sampling`` attributes are intentionally
+        read from the in-memory config only.  Training configs do not define
+        them, so the normal curriculum path remains unchanged.
+        """
+        obstacle_cfg = self.cfg.dynamic_obstacles
+        mode = getattr(obstacle_cfg, 'dataset_speed_sampling', 'curriculum')
+        if mode == 'curriculum':
+            low, high = self._get_dynamic_obstacle_speed_range()
+            return torch.full(
+                (len(env_ids),), low, device=self.device, dtype=torch.float
+            ), torch.full(
+                (len(env_ids),), high, device=self.device, dtype=torch.float
+            )
+
+        sampling_range = getattr(
+            obstacle_cfg, 'dataset_speed_sampling_range', obstacle_cfg.speed_range
+        )
+        full_min, full_max = [float(value) for value in sampling_range]
+        if not (0.0 <= full_min < full_max):
+            raise ValueError(
+                'dataset_speed_sampling_range must satisfy 0 <= min < max'
+            )
+        if mode == 'uniform':
+            low = torch.full(
+                (len(env_ids),), full_min, device=self.device, dtype=torch.float
+            )
+            high = torch.full(
+                (len(env_ids),), full_max, device=self.device, dtype=torch.float
+            )
+            return low, high
+        if mode != 'stratified':
+            raise ValueError(
+                'dataset_speed_sampling must be curriculum, uniform, or stratified'
+            )
+
+        # Group global environment ids into three approximately equal blocks.
+        # This gives every reset a stable low/medium/high speed assignment and
+        # avoids rejection sampling on the GPU.
+        group = torch.div(
+            env_ids * 3, max(self.num_envs, 1), rounding_mode='floor'
+        ).clamp(max=2)
+        bin_low = torch.tensor(
+            [full_min, 0.5, 1.0], device=self.device, dtype=torch.float
+        )
+        bin_high = torch.tensor(
+            [0.5, 1.0, full_max], device=self.device, dtype=torch.float
+        )
+        return bin_low[group], bin_high[group]
 
     def _get_room_constrained_bounds(self, env_ids):
         """Return obstacle-center bounds that stay inside each room cell.
@@ -435,11 +494,13 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
                     )
                 )
 
-        speed_min, speed_max = self._get_dynamic_obstacle_speed_range()
-        if speed_min < 0.0 or speed_max < speed_min:
+        speed_min, speed_max = self._get_dynamic_obstacle_speed_ranges(env_ids)
+        if torch.any(speed_min < 0.0) or torch.any(speed_max < speed_min):
             raise ValueError("dynamic_obstacles.speed_range is invalid")
         self.dynamic_obstacle_current_speed_range[env_ids, 0] = speed_min
         self.dynamic_obstacle_current_speed_range[env_ids, 1] = speed_max
+        speed_min = speed_min.view(count, 1, 1)
+        speed_max = speed_max.view(count, 1, 1)
         speed = speed_min + torch.rand(
             count, self.num_dynamic_obstacles, 1, device=self.device
         ) * (speed_max - speed_min)
@@ -697,6 +758,50 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         )
         self.active_obstacle_radial_velocity_valid_mask = same_dynamic
 
+        # Exact environmental derivative of the analytic ray-circle boundary.
+        # The robot pose is frozen; only the active obstacle trajectory moves.
+        current_position, _ = self._compute_dynamic_obstacle_states_at_time()
+        selected_position = torch.gather(
+            current_position,
+            1,
+            selected_ids.unsqueeze(-1).expand(-1, -1, 2),
+        )
+        delta_x = selected_position[..., 0] - self.root_states[:, None, 0]
+        delta_y = selected_position[..., 1] - self.root_states[:, None, 1]
+        position_body_x = (
+            delta_x * cos_yaw[:, None] + delta_y * sin_yaw[:, None]
+        )
+        position_body_y = (
+            -delta_x * sin_yaw[:, None] + delta_y * cos_yaw[:, None]
+        )
+        ray_cos = torch.cos(ray_angles)
+        ray_sin = torch.sin(ray_angles)
+        perpendicular = -position_body_x * ray_sin + position_body_y * ray_cos
+        discriminant = self.dynamic_obstacle_radius ** 2 - perpendicular.square()
+        discriminant_sqrt = torch.sqrt(torch.clamp(discriminant, min=0.0))
+        velocity_body_x = (
+            selected_velocity[..., 0] * cos_yaw[:, None]
+            + selected_velocity[..., 1] * sin_yaw[:, None]
+        )
+        velocity_body_y = (
+            -selected_velocity[..., 0] * sin_yaw[:, None]
+            + selected_velocity[..., 1] * cos_yaw[:, None]
+        )
+        normal_velocity = velocity_body_x * ray_cos + velocity_body_y * ray_sin
+        tangent_velocity = -velocity_body_x * ray_sin + velocity_body_y * ray_cos
+        denominator = discriminant_sqrt.clamp_min(1e-6)
+        geometric_closing = -normal_velocity - (
+            perpendicular * tangent_velocity / denominator
+        )
+        geometric_valid = same_dynamic & (discriminant >= 0.0)
+        self.active_obstacle_geometric_closing_rate_gt = torch.where(
+            geometric_valid, geometric_closing, torch.zeros_like(geometric_closing)
+        )
+        self.active_obstacle_geometric_closing_valid_mask = geometric_valid
+        self.active_obstacle_ray_discriminant_sqrt = torch.where(
+            geometric_valid, discriminant_sqrt, torch.zeros_like(discriminant_sqrt)
+        )
+
     def _get_rays(self, env_ids=None):
         """Fuse terrain rays with analytic ray-box approximations."""
 
@@ -801,3 +906,6 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         self.same_dynamic_source_mask[env_ids] = False
         self.active_obstacle_radial_velocity_gt[env_ids] = 0.0
         self.active_obstacle_radial_velocity_valid_mask[env_ids] = False
+        self.active_obstacle_geometric_closing_rate_gt[env_ids] = 0.0
+        self.active_obstacle_geometric_closing_valid_mask[env_ids] = False
+        self.active_obstacle_ray_discriminant_sqrt[env_ids] = 0.0

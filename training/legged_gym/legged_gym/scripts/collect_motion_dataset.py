@@ -10,6 +10,11 @@ Example::
         --policy_path logs/Go2_pos_rough/<run>/model_2000.pt \
         --num_envs 512 --max_samples 200000 --output_dir /tmp/motion_dataset_v2 \
         --headless --sim_device cuda:0 --rl_device cuda:0
+
+    The v3 stratified dataset uses the dataset-only speed override:
+
+        --motion_speed_sampling stratified \
+        --output_dir datasets/motion_dataset_v3
 """
 
 import argparse
@@ -40,6 +45,11 @@ def _parse_script_args():
     parser.add_argument('--output_dir', type=str, default=None)
     parser.add_argument('--shard_size', type=int, default=10000)
     parser.add_argument('--seed', type=int, default=1)
+    parser.add_argument(
+        '--motion_speed_sampling', choices=['curriculum', 'uniform', 'stratified'],
+        default='curriculum',
+        help='Obstacle speed sampling for the dataset-only in-memory override.',
+    )
     parser.add_argument('--headless', action='store_true', default=True)
     parser.add_argument(
         '--include_warmup', action='store_true',
@@ -93,6 +103,12 @@ def _configure_env(env_cfg, script_args):
         env_cfg.replay.enable_dynamic_obstacle_replay = False
     env_cfg.visualization.draw_rays = False
     env_cfg.visualization.draw_position_target = False
+    # These attributes are consumed only by DynamicObstacleGo2Pos during this
+    # collector process.  The checked-in training configuration is untouched.
+    env_cfg.dynamic_obstacles.dataset_speed_sampling = (
+        script_args.motion_speed_sampling
+    )
+    env_cfg.dynamic_obstacles.dataset_speed_sampling_range = [0.2, 1.5]
 
 
 def _yaw_from_quat(quat):
@@ -146,6 +162,12 @@ def _validate_batch(env, indices):
         'active_obstacle_radial_velocity_gt': (
             env.active_obstacle_radial_velocity_gt[indices]
         ),
+        'active_obstacle_geometric_closing_rate_gt': (
+            env.active_obstacle_geometric_closing_rate_gt[indices]
+        ),
+        'active_obstacle_ray_discriminant_sqrt': (
+            env.active_obstacle_ray_discriminant_sqrt[indices]
+        ),
     }
     if not all(torch.isfinite(value).all() for value in tensors.values()):
         raise RuntimeError('non-finite tensor encountered while collecting')
@@ -186,6 +208,7 @@ def _validate_batch(env, indices):
         'source_switch_mask',
         'same_dynamic_source_mask',
         'active_obstacle_radial_velocity_valid_mask',
+        'active_obstacle_geometric_closing_valid_mask',
     ]:
         if tuple(getattr(env, name)[indices].shape) != expected_ids:
             raise RuntimeError('{} shape mismatch'.format(name))
@@ -247,6 +270,35 @@ def _cpu_payload(env, indices, episode_ids, episode_steps, global_step):
         ),
         'active_obstacle_radial_velocity_valid_mask': (
             env.active_obstacle_radial_velocity_valid_mask[indices].detach().cpu()
+        ),
+        'active_obstacle_geometric_closing_rate_gt': (
+            env.active_obstacle_geometric_closing_rate_gt[indices]
+            .detach().cpu().float()
+        ),
+        'active_obstacle_geometric_closing_valid_mask': (
+            env.active_obstacle_geometric_closing_valid_mask[indices]
+            .detach().cpu()
+        ),
+        'active_obstacle_ray_discriminant_sqrt': (
+            env.active_obstacle_ray_discriminant_sqrt[indices]
+            .detach().cpu().float()
+        ),
+        # These trajectory parameters make counterfactual horizons
+        # reconstructible offline without rerunning Isaac Gym.
+        'obstacle_trajectory_initial_velocity_world': (
+            env.dynamic_obstacle_velocity[indices].detach().cpu().float()
+        ),
+        'obstacle_trajectory_start_local': (
+            env.dynamic_obstacle_start[indices].detach().cpu().float()
+        ),
+        'obstacle_trajectory_effective_low_local': (
+            env.dynamic_obstacle_effective_low[indices].detach().cpu().float()
+        ),
+        'obstacle_trajectory_effective_high_local': (
+            env.dynamic_obstacle_effective_high[indices].detach().cpu().float()
+        ),
+        'obstacle_trajectory_time': (
+            env.dynamic_obstacle_time[indices].detach().cpu().float()
         ),
         'robot_xy_world': env.root_states[indices, :2].detach().cpu().float(),
         'robot_yaw': yaw.detach().cpu().float(),
@@ -390,6 +442,9 @@ def collect(args, script_args):
         print('[collector] output_dir={} max_samples={} shard_size={}'.format(
             output_dir, script_args.max_samples, script_args.shard_size,
         ), flush=True)
+        print('[collector] motion_speed_sampling={} range=[0.2, 1.5]'.format(
+            script_args.motion_speed_sampling,
+        ), flush=True)
 
         with torch.no_grad():
             while (
@@ -505,8 +560,18 @@ def collect(args, script_args):
             'continuous_closing_rate_gt': [num_rays],
             'active_obstacle_radial_velocity_gt': [num_rays],
             'active_obstacle_radial_velocity_valid_mask': [num_rays],
+            'active_obstacle_geometric_closing_rate_gt': [num_rays],
+            'active_obstacle_geometric_closing_valid_mask': [num_rays],
+            'active_obstacle_ray_discriminant_sqrt': [num_rays],
+            'obstacle_trajectory_initial_velocity_world': [env.num_dynamic_obstacles, 2],
+            'obstacle_trajectory_start_local': [env.num_dynamic_obstacles, 2],
+            'obstacle_trajectory_effective_low_local': [2],
+            'obstacle_trajectory_effective_high_local': [2],
+            'obstacle_trajectory_time': [],
         },
-        'dataset_version': 'v2',
+        'dataset_version': (
+            'v3' if script_args.motion_speed_sampling != 'curriculum' else 'v2'
+        ),
         'trajectory_velocity_semantics': (
             'Reflected analytic velocity returned by '
             '_compute_dynamic_obstacle_states_at_time; do not use raw '
@@ -530,6 +595,18 @@ def collect(args, script_args):
         'history_length': history_len,
         'ray_angles_deg': ray_angles_deg,
         'obstacle_speed_range': list(env_cfg.dynamic_obstacles.speed_range),
+        'motion_speed_sampling': script_args.motion_speed_sampling,
+        'motion_speed_sampling_range': [0.2, 1.5],
+        'speed_bin_definition': [
+            {'name': 'low', 'range': [0.2, 0.5]},
+            {'name': 'medium', 'range': [0.5, 1.0]},
+            {'name': 'high', 'range': [1.0, 1.5]},
+        ],
+        'dynamic_obstacle_radius': float(env.dynamic_obstacle_radius),
+        'dynamic_ray_range': [
+            float(env_cfg.sensors.ray2d.min_dist),
+            float(env_cfg.sensors.ray2d.max_dist),
+        ],
         'obstacle_speed_curriculum': {
             'enabled': bool(env_cfg.dynamic_obstacles.curriculum.enabled),
             'speed_start': list(env_cfg.dynamic_obstacles.curriculum.speed_start),
@@ -554,7 +631,9 @@ def collect(args, script_args):
         json.dump(manifest, file, indent=2)
     with open(os.path.join(output_dir, 'collection_config.json'), 'w') as file:
         json.dump({
-            'dataset_version': 'v2',
+            'dataset_version': (
+                'v3' if script_args.motion_speed_sampling != 'curriculum' else 'v2'
+            ),
             'policy_path': policy_path,
             'num_envs': script_args.num_envs,
             'max_samples': script_args.max_samples,
@@ -563,6 +642,13 @@ def collect(args, script_args):
             'seed': script_args.seed,
             'headless': True,
             'include_warmup': script_args.include_warmup,
+            'motion_speed_sampling': script_args.motion_speed_sampling,
+            'motion_speed_sampling_range': [0.2, 1.5],
+            'speed_bin_definition': [
+                {'name': 'low', 'range': [0.2, 0.5]},
+                {'name': 'medium', 'range': [0.5, 1.0]},
+                {'name': 'high', 'range': [1.0, 1.5]},
+            ],
             'trajectory_velocity_semantics': (
                 'analytic reflected trajectory velocity'
             ),

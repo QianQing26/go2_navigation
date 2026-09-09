@@ -3,7 +3,9 @@
 The script never changes the formal training target.  In particular,
 ``closing_rate_gt`` remains the raw hard-min finite-difference target.  v2
 datasets additionally contain analytic trajectory velocity, active source
-ids, source transitions, and radial velocity diagnostics.
+ids, source transitions, and radial velocity diagnostics.  v3 datasets add
+the exact geometric ray-boundary derivative and enough trajectory state to
+evaluate counterfactual finite-difference horizons offline.
 """
 
 import argparse
@@ -25,6 +27,7 @@ BASE_REQUIRED_KEYS = {
     'global_policy_step',
 }
 V2_REQUIRED_KEYS = {
+    'obstacle_trajectory_position_world',
     'obstacle_trajectory_velocity_world',
     'obstacle_physics_velocity_world',
     'active_dynamic_obstacle_id', 'future_active_dynamic_obstacle_id',
@@ -33,6 +36,17 @@ V2_REQUIRED_KEYS = {
     'source_switch_type', 'active_obstacle_radial_velocity_gt',
     'active_obstacle_radial_velocity_valid_mask',
 }
+V3_REQUIRED_KEYS = {
+    'active_obstacle_geometric_closing_rate_gt',
+    'active_obstacle_geometric_closing_valid_mask',
+    'active_obstacle_ray_discriminant_sqrt',
+    'obstacle_trajectory_initial_velocity_world',
+    'obstacle_trajectory_start_local',
+    'obstacle_trajectory_effective_low_local',
+    'obstacle_trajectory_effective_high_local',
+    'obstacle_trajectory_time',
+}
+OPTIONAL_KEYS = V2_REQUIRED_KEYS | V3_REQUIRED_KEYS
 SWITCH_NAMES = {
     0: 'no_switch',
     1: 'static_to_dynamic',
@@ -121,7 +135,7 @@ def _load_dataset(dataset_dir):
         raise FileNotFoundError('No dataset shards found in {}'.format(dataset_dir))
 
     chunks = {key: [] for key in BASE_REQUIRED_KEYS}
-    optional_chunks = {key: [] for key in V2_REQUIRED_KEYS}
+    optional_chunks = {key: [] for key in OPTIONAL_KEYS}
     total = 0
     reference_shapes = None
     optional_presence = None
@@ -133,7 +147,7 @@ def _load_dataset(dataset_dir):
         num_samples = int(shard['closing_rate_gt'].shape[0])
         if num_samples < 1:
             raise RuntimeError('Empty shard: {}'.format(path))
-        current_optional = V2_REQUIRED_KEYS.intersection(shard.keys())
+        current_optional = OPTIONAL_KEYS.intersection(shard.keys())
         if optional_presence is None:
             optional_presence = current_optional
         elif current_optional != optional_presence:
@@ -346,6 +360,109 @@ def _agreement_stats(raw, radial):
     }
 
 
+def _comparison_stats(reference, estimate, epsilon=1e-6):
+    """Compare two finite-difference/derivative targets on a valid mask."""
+    reference = reference.reshape(-1).float()
+    estimate = estimate.reshape(-1).float()
+    finite = torch.isfinite(reference) & torch.isfinite(estimate)
+    reference, estimate = reference[finite], estimate[finite]
+    if reference.numel() == 0:
+        return {'count': 0}
+    error = reference - estimate
+    sign_valid = (reference.abs() > epsilon) | (estimate.abs() > epsilon)
+    sign_agreement = (
+        (torch.sign(reference[sign_valid]) == torch.sign(estimate[sign_valid])).float().mean()
+        if sign_valid.any() else torch.tensor(float('nan'))
+    )
+    approaching = estimate > epsilon
+    receding = estimate < -epsilon
+    return {
+        'count': int(reference.numel()),
+        'correlation': _corr_stats(reference, estimate),
+        'mae': _json_number(error.abs().mean()),
+        'rmse': _json_number(torch.sqrt(error.square().mean())),
+        'bias_gt_minus_geometric': _json_number(error.mean()),
+        'sign_agreement': _json_number(sign_agreement),
+        'approaching_only_count': int(approaching.sum()),
+        'approaching_only_mae': (
+            _json_number(error[approaching].abs().mean()) if approaching.any() else None
+        ),
+        'receding_only_count': int(receding.sum()),
+        'receding_only_mae': (
+            _json_number(error[receding].abs().mean()) if receding.any() else None
+        ),
+        'gt_distribution': _distribution(reference),
+        'geometric_distribution': _distribution(estimate),
+    }
+
+
+def _geometric_validation(data, same_dynamic):
+    required = {
+        'active_obstacle_geometric_closing_rate_gt',
+        'active_obstacle_geometric_closing_valid_mask',
+    }
+    if not required.issubset(data):
+        return {
+            'checked': False,
+            'reason': 'v3 exact geometric fields are unavailable',
+        }
+    valid = same_dynamic & data[
+        'active_obstacle_geometric_closing_valid_mask'
+    ].bool()
+    return {
+        'checked': True,
+        'valid_mask_count': int(valid.sum()),
+        'comparison': _comparison_stats(
+            data['closing_rate_gt'][valid],
+            data['active_obstacle_geometric_closing_rate_gt'][valid],
+        ),
+    }
+
+
+def _grazing_validation(data, same_dynamic, radius):
+    required = {
+        'active_obstacle_geometric_closing_rate_gt',
+        'active_obstacle_ray_discriminant_sqrt',
+        'active_obstacle_geometric_closing_valid_mask',
+    }
+    if not required.issubset(data):
+        return {
+            'checked': False,
+            'reason': 'v3 grazing fields are unavailable',
+        }
+    valid = same_dynamic & data[
+        'active_obstacle_geometric_closing_valid_mask'
+    ].bool()
+    margin = data['active_obstacle_ray_discriminant_sqrt'].float()
+    normalized = margin / max(float(radius), 1e-6)
+    closing = data['closing_rate_gt'].float()
+    geometric = data['active_obstacle_geometric_closing_rate_gt'].float()
+    edges = [0.0, 0.1, 0.25, 0.5, 0.75, 1.0]
+    bins = []
+    for index, (low, high) in enumerate(zip(edges[:-1], edges[1:])):
+        in_bin = (normalized >= low) & (
+            normalized <= high if index == len(edges) - 2 else normalized < high
+        )
+        selected = valid & in_bin
+        error = closing[selected] - geometric[selected]
+        bins.append({
+            'low_normalized_margin': low,
+            'high_normalized_margin': high,
+            'count': int(error.numel()),
+            'mean_abs_gt': _json_number(closing[selected].abs().mean()) if error.numel() else None,
+            'mean_abs_geometric': _json_number(geometric[selected].abs().mean()) if error.numel() else None,
+            'correlation': _corr_stats(closing[selected], geometric[selected]),
+            'mae': _json_number(error.abs().mean()) if error.numel() else None,
+            'rmse': _json_number(torch.sqrt(error.square().mean())) if error.numel() else None,
+        })
+    return {
+        'checked': True,
+        'normalization': 'sqrt(r^2-b^2) / r',
+        'bins': bins,
+        'margin_distribution': _distribution(margin[valid]),
+    }
+
+
 def _trajectory_speed_validation(data, manifest):
     if 'obstacle_trajectory_velocity_world' not in data:
         physical = torch.linalg.vector_norm(
@@ -380,8 +497,16 @@ def _trajectory_speed_validation(data, manifest):
         'configured_final_range': final_range,
         'configured_curriculum_envelope': envelope,
     }
+    sampling_range = None
+    if manifest is not None and manifest.get('motion_speed_sampling_range'):
+        sampling_range = [
+            float(x) for x in manifest['motion_speed_sampling_range']
+        ]
+        result['configured_sampling_range'] = sampling_range
     for name, bounds in [
-        ('final_range', final_range), ('curriculum_envelope', envelope)
+        ('final_range', final_range),
+        ('curriculum_envelope', envelope),
+        ('sampling_range', sampling_range),
     ]:
         if bounds is None:
             continue
@@ -450,6 +575,151 @@ def _speed_conditioned_stats(
         'bin_edges': edges,
         'bins': bins,
     }
+
+
+def _speed_coverage_and_geometric_stats(
+    data, closing, geometric, geometric_valid, same_dynamic,
+    source_ids, trajectory_velocity, speed_bins,
+):
+    if trajectory_velocity is None or geometric is None:
+        return {
+            'checked': False,
+            'reason': 'v3 trajectory/geometric fields are unavailable',
+        }
+    speed = torch.linalg.vector_norm(trajectory_velocity.float(), dim=-1)
+    selected_ids = source_ids.clamp(min=0)
+    selected_speed = torch.gather(speed, 1, selected_ids)
+    same_dynamic = same_dynamic.bool()
+    geometric_valid = geometric_valid.bool()
+    edges = list(speed_bins)
+    bins = []
+    for index, (low, high) in enumerate(zip(edges[:-1], edges[1:])):
+        obstacle_in_bin = (speed >= low) & (
+            speed <= high if index == len(edges) - 2 else speed < high
+        )
+        same_dynamic_in_bin = same_dynamic & obstacle_in_bin.gather(1, selected_ids)
+        comparison_valid = same_dynamic_in_bin & geometric_valid
+        gt_values = closing[comparison_valid]
+        geometric_values = geometric[comparison_valid]
+        bins.append({
+            'name': ['low', 'medium', 'high'][index] if index < 3 else 'bin_{}'.format(index),
+            'low': low,
+            'high': high,
+            'obstacle_count': int(obstacle_in_bin.sum()),
+            'dataset_sample_count': int(obstacle_in_bin.any(dim=1).sum()),
+            'same_dynamic_source_ray_count': int(same_dynamic_in_bin.sum()),
+            'comparison': _comparison_stats(gt_values, geometric_values),
+        })
+    observed = speed.reshape(-1)
+    warnings = [
+        item['name'] for item in bins
+        if item['same_dynamic_source_ray_count'] < 0.1 * max(int(same_dynamic.sum()), 1)
+    ]
+    return {
+        'checked': True,
+        'speed_distribution': _distribution(observed),
+        'observed_min': _json_number(observed.min()),
+        'observed_max': _json_number(observed.max()),
+        'bin_edges': edges,
+        'bins': bins,
+        'warning_bins_below_10_percent_of_valid_rays': warnings,
+    }
+
+
+def _trajectory_positions_at_horizon(data, delta):
+    required = {
+        'obstacle_trajectory_position_world',
+        'obstacle_trajectory_initial_velocity_world',
+        'obstacle_trajectory_start_local',
+        'obstacle_trajectory_effective_low_local',
+        'obstacle_trajectory_effective_high_local',
+        'obstacle_trajectory_time',
+    }
+    if not required.issubset(data):
+        return None
+    start = data['obstacle_trajectory_start_local'].float()
+    velocity = data['obstacle_trajectory_initial_velocity_world'].float()
+    low = data['obstacle_trajectory_effective_low_local'].float().unsqueeze(1)
+    high = data['obstacle_trajectory_effective_high_local'].float().unsqueeze(1)
+    time = data['obstacle_trajectory_time'].float().reshape(-1, 1, 1)
+    span = high - low
+
+    def reflected(query_time):
+        travel = start + velocity * query_time
+        phase = torch.remainder(travel - low, 2.0 * span)
+        return torch.where(phase <= span, phase, 2.0 * span - phase) + low
+
+    current_local = reflected(time)
+    world_origin = data['obstacle_trajectory_position_world'].float() - current_local
+    return world_origin + reflected(time + float(delta))
+
+
+def _dynamic_ray_query(positions, data, angles, radius, ray_range):
+    delta = positions - data['robot_xy_world'].float().unsqueeze(1)
+    yaw = data['robot_yaw'].float().reshape(-1, 1)
+    cos_yaw, sin_yaw = torch.cos(yaw), torch.sin(yaw)
+    x = delta[..., 0] * cos_yaw + delta[..., 1] * sin_yaw
+    y = -delta[..., 0] * sin_yaw + delta[..., 1] * cos_yaw
+    ray_cos = torch.cos(angles).view(1, 1, -1)
+    ray_sin = torch.sin(angles).view(1, 1, -1)
+    along = x.unsqueeze(-1) * ray_cos + y.unsqueeze(-1) * ray_sin
+    perpendicular = -x.unsqueeze(-1) * ray_sin + y.unsqueeze(-1) * ray_cos
+    discriminant = float(radius) ** 2 - perpendicular.square()
+    near = along - torch.sqrt(torch.clamp(discriminant, min=0.0))
+    valid = (
+        (discriminant >= 0.0)
+        & (near >= float(ray_range[0]))
+        & (near <= float(ray_range[1]))
+    )
+    distances = torch.where(
+        valid, near, torch.full_like(near, float(ray_range[1]))
+    )
+    rays, active_ids = distances.min(dim=1)
+    hit = valid.any(dim=1)
+    active_ids = torch.where(hit, active_ids, torch.full_like(active_ids, -1))
+    return rays, active_ids
+
+
+def _horizon_geometric_validation(data, geometric, geometric_valid, angles, radius, ray_range):
+    if geometric is None or not geometric_valid.bool().any():
+        return {'checked': False, 'reason': 'v3 geometric fields are unavailable'}
+    current_source = data.get('current_fused_source_id')
+    if current_source is None:
+        return {'checked': False, 'reason': 'fused source ids are unavailable'}
+    results = []
+    for delta in [0.02, 0.05, 0.1, 0.2]:
+        future_positions = _trajectory_positions_at_horizon(data, delta)
+        if future_positions is None:
+            return {
+                'checked': False,
+                'reason': 'trajectory counterfactual fields are unavailable',
+            }
+        dynamic, future_dynamic_id = _dynamic_ray_query(
+            future_positions, data, angles, radius, ray_range
+        )
+        future_fused = torch.minimum(data['static_rays'].float(), dynamic)
+        future_source = torch.where(
+            data['static_rays'].float() <= dynamic,
+            torch.full_like(future_dynamic_id, -1), future_dynamic_id
+        )
+        same_source = (
+            (current_source >= 0)
+            & (future_source == current_source)
+        )
+        valid = same_source & geometric_valid.bool()
+        finite_difference = (
+            data['current_fused_rays'].float() - future_fused
+        ) / float(delta)
+        comparison = _comparison_stats(
+            finite_difference[valid], geometric[valid]
+        )
+        results.append({
+            'horizon_seconds': delta,
+            'valid_count': int(valid.sum()),
+            'source_switch_ratio': float((future_source != current_source).float().mean()),
+            'comparison': comparison,
+        })
+    return {'checked': True, 'horizons': results}
 
 
 def _switching_stats(closing, source_switch_type):
@@ -529,6 +799,34 @@ def _lse_temporal_target(data, source_switch, horizon, d_safe, kappa):
         'non_switching': _distribution(target[~source_switch.any(dim=1)]),
         'target': target,
     }
+
+
+def _lse_speed_conditioned(target, trajectory_velocity, speed_bins, epsilon):
+    if trajectory_velocity is None:
+        return {
+            'checked': False,
+            'reason': 'trajectory velocity is unavailable',
+        }
+    speed = torch.linalg.vector_norm(trajectory_velocity.float(), dim=-1).mean(dim=1)
+    results = []
+    for index, (low, high) in enumerate(zip(speed_bins[:-1], speed_bins[1:])):
+        mask = (speed >= low) & (
+            speed <= high if index == len(speed_bins) - 2 else speed < high
+        )
+        values = target[mask]
+        results.append({
+            'name': ['low', 'medium', 'high'][index] if index < 3 else 'bin_{}'.format(index),
+            'low': low,
+            'high': high,
+            'sample_count': int(values.numel()),
+            'mean': _json_number(values.mean()) if values.numel() else None,
+            'std': _json_number(values.std(unbiased=False)) if values.numel() else None,
+            'p95': _json_number(torch.quantile(values, torch.tensor(0.95))) if values.numel() else None,
+            'p99': _json_number(torch.quantile(values, torch.tensor(0.99))) if values.numel() else None,
+            'p99_9': _json_number(torch.quantile(values, torch.tensor(0.999))) if values.numel() else None,
+            'approaching_ratio': float((values < -epsilon).float().mean()) if values.numel() else None,
+        })
+    return {'checked': True, 'conditioning': 'mean trajectory speed per sample', 'bins': results}
 
 
 def _write_figures(
@@ -658,6 +956,94 @@ def _write_figures(
     return figures_dir
 
 
+def _write_v3_figures(
+    figures_dir, closing, geometric, geometric_valid, same_dynamic,
+    grazing_margin, horizon_summary, speed_summary,
+):
+    """Write the exact-geometry diagnostics without changing legacy plots."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    valid = same_dynamic & geometric_valid.bool()
+    if valid.any():
+        x = geometric[valid].reshape(-1).numpy()
+        y = closing[valid].reshape(-1).numpy()
+        normalized_margin = grazing_margin[valid].reshape(-1).numpy()
+        if x.size > 100000:
+            keep = np.linspace(0, x.size - 1, 100000).astype(np.int64)
+            x, y, normalized_margin = x[keep], y[keep], normalized_margin[keep]
+        plt.figure(figsize=(6, 6))
+        plt.hexbin(x, y, gridsize=60, mincnt=1, bins='log')
+        limit = max(float(np.max(np.abs(x))), float(np.max(np.abs(y))), 1e-3)
+        plt.plot([-limit, limit], [-limit, limit], 'r--', label='y=x')
+        plt.xlabel('exact geometric closing rate [m/s]')
+        plt.ylabel('finite-horizon closing_rate_gt [m/s]')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(figures_dir, 'continuous_closing_vs_geometric_velocity.png'), dpi=140)
+        plt.close()
+
+        errors = np.abs(y - x)
+        plt.figure(figsize=(8, 5))
+        plt.hexbin(normalized_margin[:len(errors)], errors, gridsize=60, mincnt=1, bins='log')
+        plt.xlabel('grazing margin sqrt(r²-b²) [m]')
+        plt.ylabel('|finite-horizon - geometric| [m/s]')
+        plt.tight_layout()
+        plt.savefig(os.path.join(figures_dir, 'geometric_error_vs_grazing_margin.png'), dpi=140)
+        plt.close()
+    else:
+        for name in [
+            'continuous_closing_vs_geometric_velocity.png',
+            'geometric_error_vs_grazing_margin.png',
+        ]:
+            plt.figure(figsize=(6, 4))
+            plt.text(0.5, 0.5, 'exact geometric validation unavailable', ha='center', va='center')
+            plt.tight_layout()
+            plt.savefig(os.path.join(figures_dir, name), dpi=140)
+            plt.close()
+
+    plt.figure(figsize=(8, 5))
+    if horizon_summary.get('horizons'):
+        horizons = [item['horizon_seconds'] for item in horizon_summary['horizons']]
+        maes = [item['comparison'].get('mae') or np.nan for item in horizon_summary['horizons']]
+        rmses = [item['comparison'].get('rmse') or np.nan for item in horizon_summary['horizons']]
+        plt.plot(horizons, maes, 'o-', label='MAE')
+        plt.plot(horizons, rmses, 's-', label='RMSE')
+        plt.xlabel('finite-difference horizon [s]')
+        plt.ylabel('error vs exact geometric derivative [m/s]')
+        plt.legend()
+    else:
+        plt.text(0.5, 0.5, 'horizon sweep unavailable', ha='center', va='center')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(figures_dir, 'horizon_vs_geometric_error.png'), dpi=140)
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    if speed_summary.get('bins'):
+        labels = [item['name'] for item in speed_summary['bins']]
+        maes = [item['comparison'].get('mae') or np.nan for item in speed_summary['bins']]
+        pearsons = [
+            (item['comparison'].get('correlation') or {}).get('pearson') or np.nan
+            for item in speed_summary['bins']
+        ]
+        x_pos = np.arange(len(labels))
+        ax = plt.gca()
+        ax.bar(x_pos - 0.18, maes, width=0.36, label='MAE')
+        ax2 = ax.twinx()
+        ax2.plot(x_pos, pearsons, 'o-', color='tab:red', label='Pearson')
+        ax.set_xticks(x_pos, labels)
+        ax.set_ylabel('MAE [m/s]')
+        ax2.set_ylabel('Pearson')
+        ax.set_title('exact geometric validation by obstacle speed')
+    else:
+        plt.text(0.5, 0.5, 'speed validation unavailable', ha='center', va='center')
+    plt.tight_layout()
+    plt.savefig(os.path.join(figures_dir, 'geometric_validation_by_speed.png'), dpi=140)
+    plt.close()
+
+
 def analyze(args):
     if args.epsilon < 0.0:
         raise ValueError('--epsilon must be non-negative')
@@ -687,9 +1073,10 @@ def analyze(args):
         angles = np.linspace(-120.0, 120.0, closing.shape[1])
     per_angle = _per_angle_stats(closing, args.epsilon)
 
-    current_source, future_source, source_switch, same_dynamic, switch_type, is_v2 = (
+    current_source, future_source, source_switch, same_dynamic_source, switch_type, is_v2 = (
         _source_fields(data, args.epsilon)
     )
+    same_dynamic = same_dynamic_source.clone()
     radial = data.get('active_obstacle_radial_velocity_gt')
     if radial is not None:
         radial = radial.float()
@@ -704,6 +1091,34 @@ def analyze(args):
         same_dynamic, current_source, trajectory_velocity, args.speed_bins,
     )
     switching = _switching_stats(closing, switch_type)
+
+    geometric = data.get('active_obstacle_geometric_closing_rate_gt')
+    geometric_valid = data.get('active_obstacle_geometric_closing_valid_mask')
+    if geometric is not None:
+        geometric = geometric.float()
+    if geometric_valid is None:
+        geometric_valid = torch.zeros_like(closing, dtype=torch.bool)
+    else:
+        geometric_valid = geometric_valid.bool()
+    geometric_comparison = _geometric_validation(data, same_dynamic_source)
+    radius = float(manifest.get('dynamic_obstacle_radius', 0.0)) if manifest else 0.0
+    grazing = _grazing_validation(data, same_dynamic_source, radius)
+    speed_geometric = _speed_coverage_and_geometric_stats(
+        data, closing, geometric, geometric_valid, same_dynamic_source,
+        current_source, trajectory_velocity, args.speed_bins,
+    )
+    if manifest is not None:
+        ray_range = manifest.get('dynamic_ray_range', [0.0, 3.0])
+    else:
+        ray_range = [0.0, 3.0]
+    horizon_validation = _horizon_geometric_validation(
+        data, geometric, geometric_valid,
+        torch.as_tensor(np.deg2rad(angles), dtype=torch.float32),
+        radius, ray_range,
+    ) if radius > 0.0 else {
+        'checked': False,
+        'reason': 'dynamic obstacle radius is unavailable',
+    }
 
     if radial is not None and same_dynamic.any():
         radial_agreement = _agreement_stats(
@@ -734,6 +1149,9 @@ def analyze(args):
         data, source_switch, horizon, args.d_safe, args.kappa
     )
     lse_target = lse.pop('target')
+    lse_speed = _lse_speed_conditioned(
+        lse_target, trajectory_velocity, args.speed_bins, args.epsilon
+    )
 
     clipping = {
         str(limit): float((closing.abs() > limit).float().mean())
@@ -747,7 +1165,8 @@ def analyze(args):
         'num_shards_loaded': len(shard_paths),
         'num_samples': int(closing.shape[0]),
         'num_ray_values': int(closing.numel()),
-        'v2_fields_present': sorted(optional_presence),
+        'v2_fields_present': sorted(V2_REQUIRED_KEYS.intersection(optional_presence)),
+        'v3_fields_present': sorted(V3_REQUIRED_KEYS.intersection(optional_presence)),
         'overall': overall,
         'absolute_value_distribution': abs_overall,
         'sign_ratios': ratio,
@@ -762,10 +1181,15 @@ def analyze(args):
         },
         'speed_conditioned_same_dynamic_source': speed_stats,
         'continuous_same_dynamic_vs_radial': radial_agreement,
+        'continuous_same_dynamic_vs_geometric': geometric_comparison,
+        'geometric_error_vs_grazing_margin': grazing,
+        'horizon_vs_geometric_error': horizon_validation,
+        'speed_coverage_and_geometric_validation': speed_geometric,
         'switching_types': switching,
         'raw_gt_clipping_report': clipping,
         'smooth_min_candidates': smooth_summary,
         'lse_temporal_target': {key: value for key, value in lse.items()},
+        'lse_temporal_target_by_speed': lse_speed,
         'sensor_frame_sampling_check': sampling_check,
         'split_check': split_check,
         'epsilon': float(args.epsilon),
@@ -776,6 +1200,17 @@ def analyze(args):
         switching, source_switch, same_dynamic, radial, smooth_data,
         lse_target,
     )
+    if geometric is not None:
+        geometric_margin = data.get('active_obstacle_ray_discriminant_sqrt')
+        if geometric_margin is None:
+            geometric_margin = torch.zeros_like(closing)
+        else:
+            geometric_margin = geometric_margin.float()
+        _write_v3_figures(
+            figures_dir, closing, geometric, geometric_valid,
+            same_dynamic_source, geometric_margin, horizon_validation,
+            speed_geometric,
+        )
     summary['figures_dir'] = figures_dir
     with open(os.path.join(output_dir, 'summary.json'), 'w') as file:
         json.dump(summary, file, indent=2, allow_nan=False)
@@ -793,10 +1228,15 @@ def analyze(args):
             summary['source_semantics']['source_switch_ray_ratio']
         ))
         file.write('continuous same-dynamic agreement: {}\n'.format(radial_agreement))
+        file.write('exact geometric agreement: {}\n'.format(geometric_comparison))
+        file.write('grazing validation: {}\n'.format(grazing))
+        file.write('horizon validation: {}\n'.format(horizon_validation))
+        file.write('speed coverage/geometric validation: {}\n'.format(speed_geometric))
         file.write('trajectory velocity validation: {}\n'.format(physical_validation))
         file.write('switching types: {}\n'.format(switching['types']))
         file.write('smooth-min candidates: {}\n'.format(smooth_summary))
         file.write('LSE temporal target: {}\n'.format(summary['lse_temporal_target']))
+        file.write('LSE temporal target by speed: {}\n'.format(lse_speed))
         file.write('sensor frame check: {}\n'.format(sampling_check))
         file.write('split check: {}\n'.format(split_check))
         file.write('raw clipping fractions: {}\n'.format(clipping))

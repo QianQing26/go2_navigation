@@ -1,0 +1,44 @@
+{
+  "dataset_version": "v3",
+  "policy_path": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/Go2_pos_rough/09_05_17-40-15_exteroception_modified/model_2000.pt",
+  "num_envs": 512,
+  "max_samples": 10000,
+  "max_policy_steps": 1000000,
+  "shard_size": 10000,
+  "seed": 1,
+  "headless": true,
+  "include_warmup": false,
+  "motion_speed_sampling": "stratified",
+  "motion_speed_sampling_range": [
+    0.2,
+    1.5
+  ],
+  "speed_bin_definition": [
+    {
+      "name": "low",
+      "range": [
+        0.2,
+        0.5
+      ]
+    },
+    {
+      "name": "medium",
+      "range": [
+        0.5,
+        1.0
+      ]
+    },
+    {
+      "name": "high",
+      "range": [
+        1.0,
+        1.5
+      ]
+    }
+  ],
+  "trajectory_velocity_semantics": "analytic reflected trajectory velocity",
+  "active_source_encoding": {
+    "static_environment": -1,
+    "dynamic_obstacle_ids": "0..M-1"
+  }
+}
