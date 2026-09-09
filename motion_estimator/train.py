@@ -2,13 +2,16 @@
 
 import argparse
 import csv
-import datetime
 import contextlib
+import datetime
 import json
 import os
 import shutil
 import sys
 import time
+
+# Keep direct execution (``python motion_estimator/train.py``) self-contained.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import torch
 import yaml
@@ -18,6 +21,7 @@ from data import MotionDataset, NormalizationStats, ShardBatchSampler, load_data
 from losses import motion_loss
 from models import MotionEstimator
 from utils.checkpoint import load_checkpoint, save_checkpoint
+from utils.runtime import project_path
 from utils.seed import seed_everything
 from utils.visualization import plot_loss_curve
 
@@ -25,14 +29,6 @@ try:
     from torch.utils.tensorboard import SummaryWriter
 except ImportError:
     SummaryWriter = None
-
-
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-
-
-def _path(value):
-    value = os.path.expanduser(value)
-    return value if os.path.isabs(value) else os.path.join(ROOT, value)
 
 
 def _parse_args():
@@ -95,12 +91,15 @@ def _to_device(batch, device):
 def _run_epoch(
     model, loader, loss_cfg, device, optimizer=None, scaler=None, amp=False,
     max_batches=None, epoch=0, phase='train', writer=None, log_interval=20,
+    drift_scale=1.0, sign_epsilon=0.05, optimistic_delta=0.1,
+    safety_score_cfg=None,
 ):
     training = optimizer is not None
     model.train(training)
     totals = {}
     count = 0
     drift_pred, drift_gt = [], []
+    drift_pred_physical, drift_gt_physical = [], []
     started = time.perf_counter()
     total_batches = len(loader)
     if max_batches is not None:
@@ -173,6 +172,8 @@ def _run_epoch(
         if not training:
             drift_pred.append(prediction['drift'].detach().float().cpu())
             drift_gt.append(batch['drift_target'].detach().float().cpu())
+            drift_pred_physical.append(prediction['drift'].detach().float().cpu())
+            drift_gt_physical.append(batch['lse_drift_gt'].detach().float().cpu())
     if count == 0:
         raise RuntimeError('No batches processed')
     result = {key: value / count for key, value in totals.items()}
@@ -183,6 +184,24 @@ def _run_epoch(
         pred = torch.cat(drift_pred)
         target = torch.cat(drift_gt)
         result['drift_mae_normalized'] = float((pred - target).abs().mean())
+        pred_physical = torch.cat(drift_pred_physical) * float(drift_scale)
+        target_physical = torch.cat(drift_gt_physical)
+        result['drift_mae'] = float((pred_physical - target_physical).abs().mean())
+        danger = target_physical < -float(sign_epsilon)
+        result['false_safe_rate'] = (
+            float((pred_physical[danger] >= 0.0).float().mean())
+            if danger.any() else None
+        )
+        result['optimistic_danger_rate'] = (
+            float((pred_physical[danger] > target_physical[danger] + float(optimistic_delta)).float().mean())
+            if danger.any() else None
+        )
+        safety_cfg = safety_score_cfg or {}
+        result['safety_score'] = (
+            result['drift_mae']
+            + float(safety_cfg.get('optimistic_weight', 0.1)) * (result['optimistic_danger_rate'] or 0.0)
+            + float(safety_cfg.get('false_safe_weight', 0.2)) * (result['false_safe_rate'] or 0.0)
+        )
     return result
 
 
@@ -197,9 +216,9 @@ def _write_csv(path, rows):
 
 
 def main(args):
-    config_path = _path(args.config)
+    config_path = project_path(args.config)
     config = _load_config(config_path)
-    dataset_dir, manifest, splits, _ = load_dataset_metadata(_path(config['dataset']['path']))
+    dataset_dir, manifest, splits, _ = load_dataset_metadata(project_path(config['dataset']['path']))
     target_cfg = _target_cfg(config, manifest)
     if int(config['model']['num_rays']) != len(manifest['ray_angles_deg']):
         raise ValueError('model.num_rays does not match manifest ray count')
@@ -209,7 +228,7 @@ def main(args):
         dataset_dir, manifest.get('total_samples'), device,
     ), flush=True)
     run_name = args.run_name or config['train'].get('run_name') or datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    run_dir = _path(os.path.join(args.artifacts_dir, run_name))
+    run_dir = project_path(os.path.join(args.artifacts_dir, run_name))
     os.makedirs(run_dir, exist_ok=True)
     shutil.copyfile(config_path, os.path.join(run_dir, 'config.yaml'))
 
@@ -276,19 +295,24 @@ def main(args):
         print('[motion_estimator] tensorboard unavailable; continuing without it', flush=True)
     start_epoch = 0
     best_metric = float('inf')
+    best_epoch = None
     if args.resume:
         checkpoint = load_checkpoint(args.resume, model, optimizer, scheduler, map_location=device)
         start_epoch = int(checkpoint.get('epoch', -1)) + 1
         best_metric = float(checkpoint.get('best_metric', best_metric))
     loss_cfg = dict(config['loss'])
-    # Loss thresholds are specified in physical m/s in YAML, while the
-    # regression targets are normalized by train-only P95 scales.
-    loss_cfg['zero_threshold'] /= normalization.closing_scale
-    loss_cfg['drift_danger_threshold'] /= normalization.drift_scale
+    # Thresholds stay in physical m/s. motion_loss uses the physical GT for
+    # masks and the normalized targets only for regression losses.
     loss_cfg['_grad_clip'] = float(config['train']['grad_clip'])
     rows = []
     patience = 0
     log_interval = int(config.get('logging', {}).get('log_interval_batches', 20))
+    evaluation_cfg = config.get('evaluation', {})
+    checkpoint_cfg = config.get('checkpoint', {})
+    selection_metric = checkpoint_cfg.get('selection_metric', 'drift_mae')
+    if selection_metric not in ('drift_mae', 'safety_score'):
+        raise ValueError('Unsupported checkpoint.selection_metric: {}'.format(selection_metric))
+    safety_score_cfg = checkpoint_cfg.get('safety_score', {})
     for epoch in range(start_epoch, epochs):
         train_sampler.set_epoch(epoch)
         train_result = _run_epoch(
@@ -296,6 +320,10 @@ def main(args):
             amp=bool(config['train'].get('amp', True)),
             max_batches=args.max_train_batches,
             epoch=epoch, phase='train', writer=writer, log_interval=log_interval,
+            drift_scale=normalization.drift_scale,
+            sign_epsilon=float(evaluation_cfg.get('sign_epsilon', 0.05)),
+            optimistic_delta=float(evaluation_cfg.get('underestimation_delta', 0.1)),
+            safety_score_cfg=safety_score_cfg,
         )
         with torch.no_grad():
             val_result = _run_epoch(
@@ -303,10 +331,17 @@ def main(args):
                 amp=bool(config['train'].get('amp', True)),
                 max_batches=args.max_val_batches,
                 epoch=epoch, phase='val', writer=writer, log_interval=log_interval,
+                drift_scale=normalization.drift_scale,
+                sign_epsilon=float(evaluation_cfg.get('sign_epsilon', 0.05)),
+                optimistic_delta=float(evaluation_cfg.get('underestimation_delta', 0.1)),
+                safety_score_cfg=safety_score_cfg,
             )
         scheduler.step()
         # Drift MAE in normalized target units is stable for model selection.
-        val_metric = val_result['drift_mae_normalized']
+        val_metric = (
+            val_result['drift_mae_normalized']
+            if selection_metric == 'drift_mae' else val_result['safety_score']
+        )
         row = {
             'epoch': epoch,
             'lr': optimizer.param_groups[0]['lr'],
@@ -317,6 +352,10 @@ def main(args):
             'train_drift': train_result['drift'],
             'val_closing': val_result['closing'],
             'val_drift': val_result['drift'],
+            'val_drift_mae_physical': val_result.get('drift_mae'),
+            'val_false_safe_rate': val_result.get('false_safe_rate'),
+            'val_optimistic_danger_rate': val_result.get('optimistic_danger_rate'),
+            'val_safety_score': val_result.get('safety_score'),
         }
         rows.append(row)
         _write_csv(os.path.join(run_dir, 'train_log.csv'), rows)
@@ -326,6 +365,7 @@ def main(args):
         )
         if val_metric < best_metric:
             best_metric = val_metric
+            best_epoch = epoch
             patience = 0
             save_checkpoint(
                 os.path.join(run_dir, 'best.pt'), model, optimizer, scheduler,
@@ -333,8 +373,14 @@ def main(args):
             )
         else:
             patience += 1
-        print('[motion_estimator] epoch={} train={:.5f} val={:.5f} drift_mae={:.5f}'.format(
-            epoch, train_result['total'], val_result['total'], val_metric,
+        false_safe = val_result.get('false_safe_rate')
+        optimistic = val_result.get('optimistic_danger_rate')
+        print('[motion_estimator] epoch={} train={:.5f} val={:.5f} selected_{}={:.5f} '
+              'physical_drift_mae={:.5f} false_safe={:.4f} optimistic={:.4f}'.format(
+            epoch, train_result['total'], val_result['total'], selection_metric, val_metric,
+            val_result.get('drift_mae', float('nan')),
+            float('nan') if false_safe is None else false_safe,
+            float('nan') if optimistic is None else optimistic,
         ), flush=True)
         if patience >= int(config['train']['early_stopping_patience']):
             print('[motion_estimator] early stopping', flush=True)
@@ -342,8 +388,14 @@ def main(args):
     if writer is not None:
         writer.close()
     with open(os.path.join(run_dir, 'metrics.json'), 'w') as file:
+        best_drift_mae_normalized = min(
+            (row['val_drift_mae'] for row in rows), default=None
+        )
         json.dump({
-            'best_val_drift_mae_normalized': best_metric,
+            'best_val_drift_mae_normalized': best_drift_mae_normalized,
+            'selection_metric': selection_metric,
+            'best_selection_metric': best_metric,
+            'best_epoch': best_epoch,
             'epochs_completed': len(rows),
             'model_parameters': sum(parameter.numel() for parameter in model.parameters()),
             'dataset_dir': dataset_dir,
@@ -356,6 +408,4 @@ def main(args):
 
 
 if __name__ == '__main__':
-    # Allow direct execution: ``python motion_estimator/train.py``.
-    sys.path.insert(0, os.path.dirname(__file__))
     main(_parse_args())

@@ -5,15 +5,18 @@ import json
 import os
 import sys
 
+# Keep direct execution (``python motion_estimator/inspect_dataset.py``) self-contained.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from data import MotionDataset, load_dataset_metadata
+from utils.runtime import project_path
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', default='datasets/motion_dataset_final')
     args = parser.parse_args()
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-    dataset = args.dataset if os.path.isabs(args.dataset) else os.path.join(root, args.dataset)
+    dataset = project_path(args.dataset)
     dataset_dir, manifest, splits, owners = load_dataset_metadata(dataset)
     print(json.dumps({
         'dataset_dir': dataset_dir,
@@ -35,5 +38,4 @@ def main():
 
 
 if __name__ == '__main__':
-    sys.path.insert(0, os.path.dirname(__file__))
     main()

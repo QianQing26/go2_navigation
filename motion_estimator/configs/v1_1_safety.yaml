@@ -1,7 +1,5 @@
 dataset:
   path: datasets/motion_dataset_final
-  # Shards are large tensor files. Zero workers is the robust default; the
-  # CLI can override this after verifying local storage/process behavior.
   num_workers: 0
   pin_memory: true
 
@@ -36,34 +34,33 @@ train:
 loss:
   zero_threshold: 0.05
   zero_weight: 0.25
-  drift_danger_threshold: 0.05
-  approaching_weight: 1.0
+  approaching_weight: 1.5
   lambda_closing: 1.0
   lambda_drift: 1.0
-  lambda_closing_under: 0.5
-  lambda_drift_optimistic: 0.5
+  lambda_closing_under: 1.0
+  lambda_drift_optimistic: 1.0
   drift_weight:
     danger_threshold: -0.05
     severe_threshold: -0.5
     normal_weight: 1.0
-    danger_weight: 1.0
-    severe_weight: 1.0
+    danger_weight: 2.0
+    severe_weight: 3.0
   speed_weight:
-    enabled: false
+    enabled: true
     medium_threshold: 0.5
     high_threshold: 1.0
-    medium: 1.0
-    high: 1.0
+    medium: 1.15
+    high: 1.30
+
+evaluation:
+  sign_epsilon: 0.05
+  underestimation_delta: 0.10
 
 checkpoint:
   selection_metric: drift_mae
   safety_score:
     optimistic_weight: 0.1
     false_safe_weight: 0.2
-
-evaluation:
-  sign_epsilon: 0.05
-  underestimation_delta: 0.10
 
 logging:
   tensorboard: true

@@ -49,14 +49,16 @@ The loader reads one shard at a time and uses the existing episode-level
 
 ```text
 motion_estimator/
-├── configs/default.yaml
+├── configs/              # v1 baseline and v1.1 B/C/D experiment configs
 ├── data/                 # shard loader and train-only normalization
 ├── models/               # CNN encoder and dual heads
 ├── losses/               # local/scalar/conservative losses
-├── utils/                # metrics, checkpoints, seeding, plots
-├── train.py
-├── evaluate.py
-└── inspect_dataset.py
+├── utils/                # metrics, checkpoints, runtime, seeding, plots
+├── train.py              # training entrypoint
+├── evaluate.py          # test/validation metrics entrypoint
+├── calibrate.py         # validation-only conservative bias analysis
+├── compare_runs.py      # metrics comparison report
+└── inspect_dataset.py   # dataset/schema inspection
 ```
 
 ## Commands
@@ -91,6 +93,54 @@ Evaluate the best checkpoint:
 python motion_estimator/evaluate.py \
   --checkpoint motion_estimator/artifacts/<run>/best.pt \
   --device cuda
+```
+
+The safety-focused evaluator also writes `drift_safety_breakdown.json`. It
+reports dynamic-only local closing metrics, mild/severe scalar danger, sample
+switching, speed-by-danger groups, and P50/P90/P95/P99/P99.5/P99.9 error
+quantiles:
+
+```bash
+python motion_estimator/evaluate.py \
+  --checkpoint motion_estimator/artifacts/<run>/best.pt \
+  --split test --device cuda
+```
+
+## v1.1 safety calibration
+
+`configs/default.yaml` remains the v1 baseline. The v1.1 configs keep the
+same data split, normalization, seed, optimizer, and architecture while
+weighting physical-unit dangerous drift targets. `v1_1_safety_b.yaml` is
+danger-weighted without speed weighting, `v1_1_safety_c.yaml` adds the
+trajectory-speed weighting, and `v1_1_safety_d.yaml` additionally uses
+`lambda_drift_optimistic: 2.0`.
+
+```bash
+python motion_estimator/train.py \
+  --config motion_estimator/configs/v1_1_safety_c.yaml \
+  --device cuda --run_name <v1_1_c_run>
+```
+
+The speed metadata is used only by the loss; it is not passed to the
+estimator. All mask and weighting decisions use physical `closing_gt` and
+`lse_drift_gt`, while regression magnitudes remain in normalized target space.
+
+Validation-only conservative calibration leaves the model forward pass
+unchanged:
+
+```bash
+python motion_estimator/calibrate.py \
+  --checkpoint motion_estimator/artifacts/<run>/best.pt \
+  --device cuda
+```
+
+Compare completed evaluation reports with:
+
+```bash
+python motion_estimator/compare_runs.py \
+  --run v1=motion_estimator/artifacts/<v1>/evaluation/metrics.json \
+  --run B=motion_estimator/artifacts/<b>/evaluation/metrics.json \
+  --run C=motion_estimator/artifacts/<c>/evaluation/metrics.json
 ```
 
 View training curves while a run is active:

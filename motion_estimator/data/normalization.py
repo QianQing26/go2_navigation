@@ -1,7 +1,6 @@
 """Train-only normalization statistics for MotionEstimator."""
 
 import json
-import math
 import os
 
 import torch
