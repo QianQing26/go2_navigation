@@ -1,0 +1,45 @@
+dataset:
+  path: datasets/motion_dataset_final
+  num_workers: 8
+  pin_memory: true
+
+model:
+  history_length: 10
+  num_rays: 41
+  input_channels: 7
+  hidden_dim: 64
+  temporal_pool: attention
+  use_ego_motion: true
+  angular_dilations: [1, 2, 4]
+
+target:
+  d_safe: 0.20
+  kappa: 10.0
+  horizon: 0.10
+  ray_max: null
+  hit_epsilon: 1.0e-4
+
+train:
+  batch_size: 512
+  epochs: 50
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  seed: 1
+  amp: true
+  early_stopping_patience: 8
+  scheduler: cosine
+  run_name: null
+
+loss:
+  zero_threshold: 0.05
+  zero_weight: 0.25
+  drift_danger_threshold: 0.05
+  lambda_closing: 1.0
+  lambda_drift: 1.0
+  lambda_closing_under: 0.5
+  lambda_drift_optimistic: 0.5
+
+evaluation:
+  sign_epsilon: 0.05
+  underestimation_delta: 0.10

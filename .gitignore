@@ -154,3 +154,5 @@ logs/
 wandb/
 
 isaacgym/
+
+datasets/
