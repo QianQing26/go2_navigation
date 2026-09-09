@@ -93,6 +93,12 @@ python motion_estimator/evaluate.py \
   --device cuda
 ```
 
+View training curves while a run is active:
+
+```bash
+tensorboard --logdir motion_estimator/artifacts/<run>/tensorboard
+```
+
 Each run stores `config.yaml`, train-only `normalization.json`,
 `train_log.csv`, `best.pt`, `last.pt`, `metrics.json`, and figures under
 `motion_estimator/artifacts/<run>/`.

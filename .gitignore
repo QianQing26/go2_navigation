@@ -156,3 +156,4 @@ wandb/
 isaacgym/
 
 datasets/
+motion_estimator/artifacts/

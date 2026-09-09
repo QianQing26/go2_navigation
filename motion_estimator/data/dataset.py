@@ -6,7 +6,7 @@ import os
 from collections import OrderedDict
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 from .normalization import NormalizationStats
 
@@ -16,6 +16,14 @@ CORE_KEYS = {
     'source_switch_mask', 'current_fused_rays', 'future_fused_rays',
     'episode_id',
 }
+
+
+def _load_shard(path):
+    """Load tensor-only dataset shards without the pickle warning."""
+    try:
+        return torch.load(path, map_location='cpu', weights_only=True)
+    except TypeError:  # Older PyTorch versions do not expose weights_only.
+        return torch.load(path, map_location='cpu')
 
 
 def _load_json(path):
@@ -115,7 +123,7 @@ class MotionDataset(Dataset):
     def _build_index(self):
         index = []
         for shard_number, path in enumerate(self.shard_paths):
-            shard = torch.load(path, map_location='cpu')
+            shard = _load_shard(path)
             missing = CORE_KEYS.difference(shard.keys())
             if missing:
                 raise RuntimeError('{} missing {}'.format(path, sorted(missing)))
@@ -135,7 +143,7 @@ class MotionDataset(Dataset):
             shard = self._cache.pop(shard_number)
             self._cache[shard_number] = shard
             return shard
-        shard = torch.load(self.shard_paths[shard_number], map_location='cpu')
+        shard = _load_shard(self.shard_paths[shard_number])
         self._cache[shard_number] = shard
         while len(self._cache) > self.max_cached_shards:
             self._cache.popitem(last=False)
@@ -204,7 +212,7 @@ class MotionDataset(Dataset):
         """Yield raw tensors for train-only statistics without per-frame I/O."""
         batch_size = int(batch_size)
         for path in self.shard_paths:
-            shard = torch.load(path, map_location='cpu')
+            shard = _load_shard(path)
             mask = torch.as_tensor([
                 int(value) in self.allowed_episode_ids
                 for value in shard['episode_id'].tolist()
@@ -234,3 +242,53 @@ def build_datasets(dataset_dir, normalization, target_cfg, history_length, ray_m
         )
         for split in ('train', 'val', 'test')
     }
+
+
+class ShardBatchSampler(Sampler):
+    """Shuffle batches while keeping every batch inside one shard.
+
+    Random frame-level sampling causes each worker to repeatedly load many
+    56 MB shards.  This sampler preserves stochastic training while making
+    shard access sequential inside each batch.
+    """
+
+    def __init__(self, dataset, batch_size, shuffle, seed=1):
+        self.dataset = dataset
+        self.batch_size = int(batch_size)
+        self.shuffle = bool(shuffle)
+        self.seed = int(seed)
+        self.epoch = 0
+        if self.batch_size < 1:
+            raise ValueError('batch_size must be positive')
+        groups = {}
+        for global_index, (shard_number, _) in enumerate(dataset.index):
+            groups.setdefault(shard_number, []).append(global_index)
+        self.groups = list(groups.values())
+
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        generator = torch.Generator().manual_seed(self.seed + self.epoch)
+        batches = []
+        group_order = list(range(len(self.groups)))
+        if self.shuffle:
+            order = torch.randperm(len(group_order), generator=generator).tolist()
+            group_order = [group_order[index] for index in order]
+        for group_index in group_order:
+            indices = self.groups[group_index]
+            if self.shuffle:
+                order = torch.randperm(len(indices), generator=generator).tolist()
+                indices = [indices[index] for index in order]
+            for start in range(0, len(indices), self.batch_size):
+                batches.append(indices[start:start + self.batch_size])
+        if self.shuffle and len(batches) > 1:
+            order = torch.randperm(len(batches), generator=generator).tolist()
+            batches = [batches[index] for index in order]
+        return iter(batches)
+
+    def __len__(self):
+        return sum(
+            (len(group) + self.batch_size - 1) // self.batch_size
+            for group in self.groups
+        )

@@ -1,6 +1,8 @@
 dataset:
   path: datasets/motion_dataset_final
-  num_workers: 8
+  # Shards are large tensor files. Zero workers is the robust default; the
+  # CLI can override this after verifying local storage/process behavior.
+  num_workers: 0
   pin_memory: true
 
 model:
@@ -43,3 +45,7 @@ loss:
 evaluation:
   sign_epsilon: 0.05
   underestimation_delta: 0.10
+
+logging:
+  tensorboard: true
+  log_interval_batches: 20

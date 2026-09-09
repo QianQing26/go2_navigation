@@ -3,22 +3,28 @@
 import argparse
 import csv
 import datetime
+import contextlib
 import json
 import os
 import shutil
 import sys
+import time
 
 import torch
 import yaml
 from torch.utils.data import DataLoader
 
-from data import MotionDataset, NormalizationStats, load_dataset_metadata
+from data import MotionDataset, NormalizationStats, ShardBatchSampler, load_dataset_metadata
 from losses import motion_loss
 from models import MotionEstimator
 from utils.checkpoint import load_checkpoint, save_checkpoint
-from utils.metrics import scalar_stats
 from utils.seed import seed_everything
 from utils.visualization import plot_loss_curve
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -86,20 +92,36 @@ def _to_device(batch, device):
     }
 
 
-def _run_epoch(model, loader, loss_cfg, device, optimizer=None, scaler=None, amp=False, max_batches=None):
+def _run_epoch(
+    model, loader, loss_cfg, device, optimizer=None, scaler=None, amp=False,
+    max_batches=None, epoch=0, phase='train', writer=None, log_interval=20,
+):
     training = optimizer is not None
     model.train(training)
     totals = {}
     count = 0
     drift_pred, drift_gt = [], []
+    started = time.perf_counter()
+    total_batches = len(loader)
+    if max_batches is not None:
+        total_batches = min(total_batches, int(max_batches))
+    print('[motion_estimator] epoch={} phase={} start batches={} samples={}'.format(
+        epoch, phase, total_batches,
+        len(loader.dataset) if hasattr(loader, 'dataset') else '?',
+    ), flush=True)
     for batch_index, batch in enumerate(loader):
         if max_batches is not None and batch_index >= max_batches:
             break
+        batch_started = time.perf_counter()
         batch = _to_device(batch, device)
         if training:
             optimizer.zero_grad(set_to_none=True)
         autocast_enabled = bool(amp and device.type == 'cuda')
-        with torch.cuda.amp.autocast(enabled=autocast_enabled):
+        autocast_context = (
+            torch.amp.autocast(device_type='cuda', enabled=True)
+            if autocast_enabled else contextlib.nullcontext()
+        )
+        with autocast_context:
             prediction = model(
                 batch['rays_hist'], batch['ego_hist'], batch['ray_hit_hist'],
                 batch['current_fused_rays'],
@@ -120,12 +142,43 @@ def _run_epoch(model, loader, loss_cfg, device, optimizer=None, scaler=None, amp
         count += batch_count
         for key in ('total', 'closing', 'drift', 'closing_under', 'drift_optimistic'):
             totals[key] = totals.get(key, 0.0) + float(losses[key].detach()) * batch_count
+        processed = batch_index + 1
+        if writer is not None:
+            step = epoch * max(total_batches, 1) + batch_index
+            for key in ('total', 'closing', 'drift', 'closing_under', 'drift_optimistic'):
+                writer.add_scalar('{}/loss_{}'.format(phase, key), float(losses[key].detach()), step)
+            writer.add_scalar('{}/samples_per_second'.format(phase), count / max(time.perf_counter() - started, 1.0e-6), step)
+        if processed == 1 or processed % max(int(log_interval), 1) == 0 or processed == total_batches:
+            elapsed = time.perf_counter() - started
+            samples_per_second = count / max(elapsed, 1.0e-6)
+            remaining = max(total_batches - processed, 0)
+            eta = remaining * elapsed / max(processed, 1)
+            memory = ''
+            if device.type == 'cuda' and torch.cuda.is_available():
+                memory = ' gpu_mem={:.1f}/{:.1f}GB'.format(
+                    torch.cuda.memory_allocated(device) / 1.0e9,
+                    torch.cuda.get_device_properties(device).total_memory / 1.0e9,
+                )
+            print(
+                '[motion_estimator] epoch={} phase={} batch={}/{} '
+                'loss={:.5f} closing={:.5f} drift={:.5f} '
+                'batch_sec={:.2f} samples_sec={:.1f} eta={:.1f}min{}'.format(
+                    epoch, phase, processed, total_batches,
+                    float(losses['total'].detach()), float(losses['closing'].detach()),
+                    float(losses['drift'].detach()),
+                    time.perf_counter() - batch_started, samples_per_second,
+                    eta / 60.0, memory,
+                ), flush=True,
+            )
         if not training:
             drift_pred.append(prediction['drift'].detach().float().cpu())
             drift_gt.append(batch['drift_target'].detach().float().cpu())
     if count == 0:
         raise RuntimeError('No batches processed')
     result = {key: value / count for key, value in totals.items()}
+    result['elapsed_seconds'] = time.perf_counter() - started
+    result['samples_per_second'] = count / max(result['elapsed_seconds'], 1.0e-6)
+    result['batches'] = total_batches
     if drift_pred:
         pred = torch.cat(drift_pred)
         target = torch.cat(drift_gt)
@@ -152,6 +205,9 @@ def main(args):
         raise ValueError('model.num_rays does not match manifest ray count')
     seed_everything(config['train']['seed'])
     device = torch.device(args.device or ('cuda' if torch.cuda.is_available() else 'cpu'))
+    print('[motion_estimator] dataset={} manifest_samples={} device={}'.format(
+        dataset_dir, manifest.get('total_samples'), device,
+    ), flush=True)
     run_name = args.run_name or config['train'].get('run_name') or datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     run_dir = _path(os.path.join(args.artifacts_dir, run_name))
     os.makedirs(run_dir, exist_ok=True)
@@ -161,6 +217,7 @@ def main(args):
         dataset_dir, 'train', normalization=None, target_cfg=target_cfg,
         history_length=config['model']['history_length'], ray_max=target_cfg['ray_max'],
     )
+    print('[motion_estimator] train index ready samples={}'.format(len(raw_train)), flush=True)
     normalization_path = os.path.join(run_dir, 'normalization.json')
     if args.resume and os.path.isfile(normalization_path):
         normalization = NormalizationStats.load(normalization_path)
@@ -169,6 +226,9 @@ def main(args):
             raw_train, target_cfg, target_cfg['ray_max']
         )
         normalization.save(normalization_path)
+    print('[motion_estimator] normalization ready ray_max={:.3f} closing_scale={:.5f} drift_scale={:.5f}'.format(
+        normalization.ray_max, normalization.closing_scale, normalization.drift_scale,
+    ), flush=True)
     datasets = {
         split: MotionDataset(
             dataset_dir, split, normalization=normalization,
@@ -177,12 +237,22 @@ def main(args):
         ) for split in ('train', 'val', 'test')
     }
     loader_kwargs = {
-        'batch_size': config['train']['batch_size'],
         'num_workers': int(args.num_workers if args.num_workers is not None else config['dataset']['num_workers']),
         'pin_memory': bool(config['dataset'].get('pin_memory', True)),
     }
-    train_loader = DataLoader(datasets['train'], shuffle=True, **loader_kwargs)
-    val_loader = DataLoader(datasets['val'], shuffle=False, **loader_kwargs)
+    train_sampler = ShardBatchSampler(
+        datasets['train'], config['train']['batch_size'], shuffle=True,
+        seed=config['train']['seed'],
+    )
+    val_sampler = ShardBatchSampler(
+        datasets['val'], config['train']['batch_size'], shuffle=False,
+        seed=config['train']['seed'],
+    )
+    train_loader = DataLoader(datasets['train'], batch_sampler=train_sampler, **loader_kwargs)
+    val_loader = DataLoader(datasets['val'], batch_sampler=val_sampler, **loader_kwargs)
+    print('[motion_estimator] loaders ready train_batches={} val_batches={} workers={}'.format(
+        len(train_loader), len(val_loader), loader_kwargs['num_workers'],
+    ), flush=True)
     model = _make_model(config, manifest, normalization).to(device)
     print('[motion_estimator] device={} parameters={}'.format(
         device, sum(parameter.numel() for parameter in model.parameters())
@@ -193,7 +263,17 @@ def main(args):
     )
     epochs = int(args.epochs or config['train']['epochs'])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(epochs, 1))
-    scaler = torch.cuda.amp.GradScaler(enabled=bool(config['train'].get('amp', True) and device.type == 'cuda'))
+    scaler_enabled = bool(config['train'].get('amp', True) and device.type == 'cuda')
+    try:
+        scaler = torch.amp.GradScaler('cuda', enabled=scaler_enabled)
+    except AttributeError:
+        scaler = torch.cuda.amp.GradScaler(enabled=scaler_enabled)
+    writer = None
+    if bool(config.get('logging', {}).get('tensorboard', True)) and SummaryWriter is not None:
+        writer = SummaryWriter(log_dir=os.path.join(run_dir, 'tensorboard'))
+        print('[motion_estimator] tensorboard_dir={}'.format(os.path.join(run_dir, 'tensorboard')), flush=True)
+    elif bool(config.get('logging', {}).get('tensorboard', True)):
+        print('[motion_estimator] tensorboard unavailable; continuing without it', flush=True)
     start_epoch = 0
     best_metric = float('inf')
     if args.resume:
@@ -208,17 +288,21 @@ def main(args):
     loss_cfg['_grad_clip'] = float(config['train']['grad_clip'])
     rows = []
     patience = 0
+    log_interval = int(config.get('logging', {}).get('log_interval_batches', 20))
     for epoch in range(start_epoch, epochs):
+        train_sampler.set_epoch(epoch)
         train_result = _run_epoch(
             model, train_loader, loss_cfg, device, optimizer, scaler,
             amp=bool(config['train'].get('amp', True)),
             max_batches=args.max_train_batches,
+            epoch=epoch, phase='train', writer=writer, log_interval=log_interval,
         )
         with torch.no_grad():
             val_result = _run_epoch(
                 model, val_loader, loss_cfg, device,
                 amp=bool(config['train'].get('amp', True)),
                 max_batches=args.max_val_batches,
+                epoch=epoch, phase='val', writer=writer, log_interval=log_interval,
             )
         scheduler.step()
         # Drift MAE in normalized target units is stable for model selection.
@@ -255,6 +339,8 @@ def main(args):
         if patience >= int(config['train']['early_stopping_patience']):
             print('[motion_estimator] early stopping', flush=True)
             break
+    if writer is not None:
+        writer.close()
     with open(os.path.join(run_dir, 'metrics.json'), 'w') as file:
         json.dump({
             'best_val_drift_mae_normalized': best_metric,
