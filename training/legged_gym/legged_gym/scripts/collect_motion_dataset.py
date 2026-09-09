@@ -8,7 +8,7 @@ Example::
 
     CUDA_VISIBLE_DEVICES=0 python collect_motion_dataset.py \
         --policy_path logs/Go2_pos_rough/<run>/model_2000.pt \
-        --num_envs 512 --max_samples 200000 --output_dir /tmp/motion_dataset \
+        --num_envs 512 --max_samples 200000 --output_dir /tmp/motion_dataset_v2 \
         --headless --sim_device cuda:0 --rl_device cuda:0
 """
 
@@ -101,6 +101,17 @@ def _yaw_from_quat(quat):
     return torch.atan2(sin_yaw, cos_yaw)
 
 
+def _source_switch_type(current_source_id, future_source_id):
+    """Encode source transitions: 0 none, 1 S->D, 2 D->S, 3 D->D."""
+    current_dynamic = current_source_id >= 0
+    future_dynamic = future_source_id >= 0
+    switch_type = torch.zeros_like(current_source_id, dtype=torch.long)
+    switch_type[(~current_dynamic) & future_dynamic] = 1
+    switch_type[current_dynamic & (~future_dynamic)] = 2
+    switch_type[current_dynamic & future_dynamic & (current_source_id != future_source_id)] = 3
+    return switch_type
+
+
 def _validate_batch(env, indices):
     history_len = int(env.cfg.env.his_len)
     num_rays = int(env.ray_angles.numel())
@@ -132,6 +143,9 @@ def _validate_batch(env, indices):
         'dynamic_rays': env.dynamic_rays[indices],
         'future_fused_rays': env.closing_rate_gt_future_fused_rays[indices],
         'future_dynamic_rays': env.future_dynamic_rays[indices],
+        'active_obstacle_radial_velocity_gt': (
+            env.active_obstacle_radial_velocity_gt[indices]
+        ),
     }
     if not all(torch.isfinite(value).all() for value in tensors.values()):
         raise RuntimeError('non-finite tensor encountered while collecting')
@@ -159,11 +173,30 @@ def _validate_batch(env, indices):
         rays_hist[:, -1], env.rays[indices], atol=1e-5, rtol=1e-5
     ):
         raise RuntimeError('rays_hist latest frame is not the current fused ray')
+    expected_ids = (len(indices), num_rays)
+    for name in [
+        'dynamic_active_obstacle_id',
+        'future_dynamic_active_obstacle_id',
+        'current_fused_source_id',
+        'future_fused_source_id',
+    ]:
+        if tuple(getattr(env, name)[indices].shape) != expected_ids:
+            raise RuntimeError('{} shape mismatch'.format(name))
+    for name in [
+        'source_switch_mask',
+        'same_dynamic_source_mask',
+        'active_obstacle_radial_velocity_valid_mask',
+    ]:
+        if tuple(getattr(env, name)[indices].shape) != expected_ids:
+            raise RuntimeError('{} shape mismatch'.format(name))
 
 
 def _cpu_payload(env, indices, episode_ids, episode_steps, global_step):
     gt = env.get_dynamic_obstacle_gt(relative_to_robot=False)
     yaw = _yaw_from_quat(env.base_quat[indices])
+    current_source_id = env.current_fused_source_id[indices]
+    future_source_id = env.future_fused_source_id[indices]
+    source_switch_mask = env.source_switch_mask[indices]
     return {
         'rays_hist': env.rays_hist[indices].detach().cpu().float(),
         'motion_ego_hist': env.motion_ego_hist[indices].detach().cpu().float(),
@@ -175,7 +208,46 @@ def _cpu_payload(env, indices, episode_ids, episode_steps, global_step):
         'future_dynamic_rays': env.future_dynamic_rays[indices].detach().cpu().float(),
         'dynamic_ray_hit_mask': env.dynamic_ray_hit_mask[indices].detach().cpu(),
         'obstacle_position_world': gt['position'][indices, :, :2].detach().cpu().float(),
-        'obstacle_velocity_world': gt['velocity'][indices, :, :2].detach().cpu().float(),
+        'obstacle_trajectory_position_world': (
+            gt['trajectory_position'][indices, :, :2].detach().cpu().float()
+        ),
+        # Keep the old key as an explicitly deprecated physical diagnostic;
+        # all new speed-conditioned analysis uses the trajectory field below.
+        'obstacle_velocity_world': (
+            gt['physical_root_velocity'][indices, :, :2].detach().cpu().float()
+        ),
+        'obstacle_physics_velocity_world': (
+            gt['physical_root_velocity'][indices, :, :2].detach().cpu().float()
+        ),
+        'obstacle_trajectory_velocity_world': (
+            gt['trajectory_velocity'][indices, :, :2].detach().cpu().float()
+        ),
+        'active_dynamic_obstacle_id': (
+            env.dynamic_active_obstacle_id[indices].detach().cpu().long()
+        ),
+        'future_active_dynamic_obstacle_id': (
+            env.future_dynamic_active_obstacle_id[indices].detach().cpu().long()
+        ),
+        'current_fused_source_id': current_source_id.detach().cpu().long(),
+        'future_fused_source_id': future_source_id.detach().cpu().long(),
+        'source_switch_mask': source_switch_mask.detach().cpu(),
+        'same_dynamic_source_mask': (
+            env.same_dynamic_source_mask[indices].detach().cpu()
+        ),
+        'source_switch_type': _source_switch_type(
+            current_source_id, future_source_id
+        ).detach().cpu().long(),
+        'continuous_closing_rate_gt': torch.where(
+            ~source_switch_mask,
+            env.closing_rate_gt[indices],
+            torch.zeros_like(env.closing_rate_gt[indices]),
+        ).detach().cpu().float(),
+        'active_obstacle_radial_velocity_gt': (
+            env.active_obstacle_radial_velocity_gt[indices].detach().cpu().float()
+        ),
+        'active_obstacle_radial_velocity_valid_mask': (
+            env.active_obstacle_radial_velocity_valid_mask[indices].detach().cpu()
+        ),
         'robot_xy_world': env.root_states[indices, :2].detach().cpu().float(),
         'robot_yaw': yaw.detach().cpu().float(),
         'env_id': indices.detach().cpu().long(),
@@ -420,6 +492,29 @@ def collect(args, script_args):
             'dynamic_rays': [num_rays],
             'future_fused_rays': [num_rays],
             'future_dynamic_rays': [num_rays],
+            'obstacle_trajectory_position_world': [env.num_dynamic_obstacles, 2],
+            'obstacle_trajectory_velocity_world': [env.num_dynamic_obstacles, 2],
+            'obstacle_physics_velocity_world': [env.num_dynamic_obstacles, 2],
+            'active_dynamic_obstacle_id': [num_rays],
+            'future_active_dynamic_obstacle_id': [num_rays],
+            'current_fused_source_id': [num_rays],
+            'future_fused_source_id': [num_rays],
+            'source_switch_mask': [num_rays],
+            'same_dynamic_source_mask': [num_rays],
+            'source_switch_type': [num_rays],
+            'continuous_closing_rate_gt': [num_rays],
+            'active_obstacle_radial_velocity_gt': [num_rays],
+            'active_obstacle_radial_velocity_valid_mask': [num_rays],
+        },
+        'dataset_version': 'v2',
+        'trajectory_velocity_semantics': (
+            'Reflected analytic velocity returned by '
+            '_compute_dynamic_obstacle_states_at_time; do not use raw '
+            'PhysX root-state velocity for speed-conditioned analysis.'
+        ),
+        'active_source_encoding': {
+            'static_environment': -1,
+            'dynamic_obstacle_ids': '0..M-1',
         },
         'policy_path': policy_path,
         'git_commit': _git_sha(),
@@ -459,6 +554,7 @@ def collect(args, script_args):
         json.dump(manifest, file, indent=2)
     with open(os.path.join(output_dir, 'collection_config.json'), 'w') as file:
         json.dump({
+            'dataset_version': 'v2',
             'policy_path': policy_path,
             'num_envs': script_args.num_envs,
             'max_samples': script_args.max_samples,
@@ -467,6 +563,13 @@ def collect(args, script_args):
             'seed': script_args.seed,
             'headless': True,
             'include_warmup': script_args.include_warmup,
+            'trajectory_velocity_semantics': (
+                'analytic reflected trajectory velocity'
+            ),
+            'active_source_encoding': {
+                'static_environment': -1,
+                'dynamic_obstacle_ids': '0..M-1',
+            },
         }, file, indent=2)
     splits = _make_splits(output_dir, shard_infos, script_args.seed)
     print('[collector] complete samples={} shards={} splits={}'.format(

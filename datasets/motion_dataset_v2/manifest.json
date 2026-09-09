@@ -1,0 +1,163 @@
+{
+  "task": "go2_pos_dynamic",
+  "total_samples": 10000,
+  "num_shards": 1,
+  "shards": [
+    {
+      "path": "shard_00000.pt",
+      "num_samples": 10000,
+      "file_size_bytes": 51649541
+    }
+  ],
+  "per_sample_shapes": {
+    "rays_hist": [
+      10,
+      41
+    ],
+    "motion_ego_hist": [
+      10,
+      3
+    ],
+    "closing_rate_gt": [
+      41
+    ],
+    "current_fused_rays": [
+      41
+    ],
+    "static_rays": [
+      41
+    ],
+    "dynamic_rays": [
+      41
+    ],
+    "future_fused_rays": [
+      41
+    ],
+    "future_dynamic_rays": [
+      41
+    ],
+    "obstacle_trajectory_position_world": [
+      6,
+      2
+    ],
+    "obstacle_trajectory_velocity_world": [
+      6,
+      2
+    ],
+    "obstacle_physics_velocity_world": [
+      6,
+      2
+    ],
+    "active_dynamic_obstacle_id": [
+      41
+    ],
+    "future_active_dynamic_obstacle_id": [
+      41
+    ],
+    "current_fused_source_id": [
+      41
+    ],
+    "future_fused_source_id": [
+      41
+    ],
+    "source_switch_mask": [
+      41
+    ],
+    "same_dynamic_source_mask": [
+      41
+    ],
+    "source_switch_type": [
+      41
+    ],
+    "continuous_closing_rate_gt": [
+      41
+    ],
+    "active_obstacle_radial_velocity_gt": [
+      41
+    ],
+    "active_obstacle_radial_velocity_valid_mask": [
+      41
+    ]
+  },
+  "dataset_version": "v2",
+  "trajectory_velocity_semantics": "Reflected analytic velocity returned by _compute_dynamic_obstacle_states_at_time; do not use raw PhysX root-state velocity for speed-conditioned analysis.",
+  "active_source_encoding": {
+    "static_environment": -1,
+    "dynamic_obstacle_ids": "0..M-1"
+  },
+  "policy_path": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/Go2_pos_rough/09_05_17-40-15_exteroception_modified/model_2000.pt",
+  "git_commit": "d496dac1e4e661b1a6a74d5f279f2ab8d8df8ff9",
+  "seed": 1,
+  "gt_horizon": 0.1,
+  "exteroception_frequency": 10.0,
+  "policy_dt": 0.02,
+  "exteroception_update_interval": 5,
+  "history_length": 10,
+  "ray_angles_deg": [
+    -120.00000762939453,
+    -114.00000762939453,
+    -108.00000762939453,
+    -102.00000762939453,
+    -96.0,
+    -90.0,
+    -84.0,
+    -78.0,
+    -72.0,
+    -66.0,
+    -60.000003814697266,
+    -54.000003814697266,
+    -48.0,
+    -42.0,
+    -36.0,
+    -30.000001907348633,
+    -24.0,
+    -18.0,
+    -12.0,
+    -6.0,
+    0.0,
+    6.0,
+    12.0,
+    18.0,
+    24.0,
+    30.000001907348633,
+    36.0,
+    42.0,
+    48.0,
+    54.000003814697266,
+    60.000003814697266,
+    66.0,
+    72.0,
+    78.0,
+    84.0,
+    90.0,
+    96.0,
+    102.00000762939453,
+    108.00000762939453,
+    114.00000762939453,
+    120.00000762939453
+  ],
+  "obstacle_speed_range": [
+    0.5,
+    1.5
+  ],
+  "obstacle_speed_curriculum": {
+    "enabled": true,
+    "speed_start": [
+      0.2,
+      0.5
+    ],
+    "speed_steps": 50000
+  },
+  "include_warmup": false,
+  "ray_range_semantics": {
+    "raw_dataset_range_checked": [
+      0.0,
+      3.0
+    ],
+    "configured_dynamic_ray_min_dist": 0.1,
+    "below_configured_min_count": 0,
+    "total_ray_value_count": 4100000,
+    "below_configured_min_ratio": 0.0,
+    "note": "Static grid rays are not clamped to min_dist; raw sub-min values are preserved."
+  }
+}

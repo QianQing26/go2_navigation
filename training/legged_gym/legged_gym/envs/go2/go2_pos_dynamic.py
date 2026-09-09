@@ -174,6 +174,29 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         self.future_dynamic_rays = torch.full_like(
             self.rays, float(self.cfg.sensors.ray2d.max_dist)
         )
+        source_shape = self.rays.shape
+        self.dynamic_active_obstacle_id = torch.full(
+            source_shape, -1, device=self.device, dtype=torch.long
+        )
+        self.future_dynamic_active_obstacle_id = torch.full(
+            source_shape, -1, device=self.device, dtype=torch.long
+        )
+        self.current_fused_source_id = torch.full(
+            source_shape, -1, device=self.device, dtype=torch.long
+        )
+        self.future_fused_source_id = torch.full(
+            source_shape, -1, device=self.device, dtype=torch.long
+        )
+        self.source_switch_mask = torch.zeros(
+            source_shape, device=self.device, dtype=torch.bool
+        )
+        self.same_dynamic_source_mask = torch.zeros(
+            source_shape, device=self.device, dtype=torch.bool
+        )
+        self.active_obstacle_radial_velocity_gt = torch.zeros_like(self.rays)
+        self.active_obstacle_radial_velocity_valid_mask = torch.zeros(
+            source_shape, device=self.device, dtype=torch.bool
+        )
         motion_estimation_cfg = getattr(self.cfg, 'motion_estimation', None)
         self.gt_horizon = float(
             getattr(motion_estimation_cfg, 'gt_horizon', 0.1)
@@ -584,42 +607,116 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
             & (near >= float(self.cfg.sensors.ray2d.min_dist))
             & (near <= float(self.cfg.sensors.ray2d.max_dist))
         )
-        dynamic_rays = torch.where(
+        ray_distances = torch.where(
             valid,
             near,
             torch.full_like(near, float(self.cfg.sensors.ray2d.max_dist)),
-        ).amin(dim=1)
-        return dynamic_rays, valid.any(dim=1)
+        )
+        dynamic_rays, active_obstacle_id = ray_distances.min(dim=1)
+        hit_mask = valid.any(dim=1)
+        active_obstacle_id = torch.where(
+            hit_mask,
+            active_obstacle_id,
+            torch.full_like(active_obstacle_id, -1),
+        )
+        return dynamic_rays, hit_mask, active_obstacle_id
 
-    def _update_closing_rate_gt(self, static_rays, current_dynamic_rays):
+    def _update_closing_rate_gt(
+        self, static_rays, current_dynamic_rays, current_active_obstacle_id
+    ):
         """Build fused finite-horizon dynamic-only boundary closing labels."""
         current_fused = torch.minimum(static_rays, current_dynamic_rays)
+        _, current_trajectory_velocity = self._compute_dynamic_obstacle_states_at_time()
         future_position, _ = self._compute_dynamic_obstacle_states_at_time(
             query_time=self.dynamic_obstacle_time + self.gt_horizon
         )
-        future_dynamic_rays, _ = self._compute_dynamic_rays_from_positions(
-            future_position, self.root_states[:, :2], self.base_quat
+        future_dynamic_rays, _, future_active_obstacle_id = (
+            self._compute_dynamic_rays_from_positions(
+                future_position, self.root_states[:, :2], self.base_quat
+            )
         )
         future_fused = torch.minimum(static_rays, future_dynamic_rays)
         self.future_dynamic_rays = future_dynamic_rays
         self.closing_rate_gt = (current_fused - future_fused) / self.gt_horizon
         self.closing_rate_gt_future_fused_rays = future_fused
 
+        current_source_id = torch.where(
+            static_rays <= current_dynamic_rays,
+            torch.full_like(current_active_obstacle_id, -1),
+            current_active_obstacle_id,
+        )
+        future_source_id = torch.where(
+            static_rays <= future_dynamic_rays,
+            torch.full_like(future_active_obstacle_id, -1),
+            future_active_obstacle_id,
+        )
+        source_switch = current_source_id != future_source_id
+        same_dynamic = (
+            (current_source_id >= 0)
+            & (future_source_id == current_source_id)
+        )
+
+        # The environmental derivative freezes the robot.  Rotate the
+        # reflected analytic obstacle velocity into the current robot yaw
+        # frame, but do not subtract the robot velocity.
+        selected_ids = current_source_id.clamp(min=0)
+        selected_velocity = torch.gather(
+            current_trajectory_velocity,
+            1,
+            selected_ids.unsqueeze(-1).expand(-1, -1, 2),
+        )
+        sin_yaw = 2.0 * (
+            self.base_quat[:, 3] * self.base_quat[:, 2]
+            + self.base_quat[:, 0] * self.base_quat[:, 1]
+        )
+        cos_yaw = 1.0 - 2.0 * (
+            self.base_quat[:, 1].square() + self.base_quat[:, 2].square()
+        )
+        velocity_body_x = (
+            selected_velocity[..., 0] * cos_yaw[:, None]
+            + selected_velocity[..., 1] * sin_yaw[:, None]
+        )
+        velocity_body_y = (
+            -selected_velocity[..., 0] * sin_yaw[:, None]
+            + selected_velocity[..., 1] * cos_yaw[:, None]
+        )
+        ray_angles = self.ray_angles.view(1, -1)
+        radial_velocity = -(
+            velocity_body_x * torch.cos(ray_angles)
+            + velocity_body_y * torch.sin(ray_angles)
+        )
+
+        self.dynamic_active_obstacle_id = current_active_obstacle_id
+        self.future_dynamic_active_obstacle_id = future_active_obstacle_id
+        self.current_fused_source_id = current_source_id
+        self.future_fused_source_id = future_source_id
+        self.source_switch_mask = source_switch
+        self.same_dynamic_source_mask = same_dynamic
+        self.active_obstacle_radial_velocity_gt = torch.where(
+            same_dynamic, radial_velocity, torch.zeros_like(radial_velocity)
+        )
+        self.active_obstacle_radial_velocity_valid_mask = same_dynamic
+
     def _get_rays(self, env_ids=None):
         """Fuse terrain rays with analytic ray-box approximations."""
 
         super()._get_rays(env_ids)
         static_rays = self.rays.clone()
-        dynamic_rays, hit_mask = self._compute_dynamic_rays_from_positions(
-            self.dynamic_obstacle_states[..., :2],
-            self.root_states[:, :2],
-            self.base_quat,
+        dynamic_rays, hit_mask, active_obstacle_id = (
+            self._compute_dynamic_rays_from_positions(
+                self.dynamic_obstacle_states[..., :2],
+                self.root_states[:, :2],
+                self.base_quat,
+            )
         )
         self.static_rays = static_rays
         self.dynamic_rays = dynamic_rays
         self.dynamic_ray_hit_mask = hit_mask
+        self.dynamic_active_obstacle_id = active_obstacle_id
         self.rays = torch.minimum(self.rays, dynamic_rays)
-        self._update_closing_rate_gt(static_rays, dynamic_rays)
+        self._update_closing_rate_gt(
+            static_rays, dynamic_rays, active_obstacle_id
+        )
 
     def get_dynamic_obstacle_gt(self, relative_to_robot=False):
         """Return simulator ground truth for dynamic obstacles.
@@ -632,16 +729,41 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         Returns:
             position: ``[num_envs, num_obstacles, 3]`` world or robot-relative
                 obstacle centers.
-            velocity: ``[num_envs, num_obstacles, 3]`` world-frame velocity.
+            velocity: Backward-compatible alias for the physical root-state
+                velocity.
+            physical_root_velocity: ``[num_envs, num_obstacles, 3]`` raw
+                Isaac Gym actor root-state velocity, retained as diagnostic.
+            trajectory_velocity: ``[num_envs, num_obstacles, 3]`` reflected
+                analytic trajectory velocity used as privileged GT.
             size: ``[num_envs, num_obstacles, 3]`` box dimensions ``[x,y,z]``.
             radius: ``[num_envs, num_obstacles, 1]`` horizontal bounding-circle
                 radius used by the analytic ray query.
             actor_indices: simulator-domain actor indices.
         """
         position = self.dynamic_obstacle_states[..., 0:3].clone()
+        trajectory_position, trajectory_velocity = (
+            self._compute_dynamic_obstacle_states_at_time()
+        )
+        trajectory_position = torch.cat(
+            (
+                trajectory_position,
+                torch.full_like(
+                    trajectory_position[..., :1], self.dynamic_obstacle_height * 0.5
+                ),
+            ),
+            dim=-1,
+        )
         if relative_to_robot:
             position[..., :2] -= self.root_states[:, None, :2]
-        velocity = self.dynamic_obstacle_states[..., 7:10].clone()
+            trajectory_position[..., :2] -= self.root_states[:, None, :2]
+        physical_root_velocity = self.dynamic_obstacle_states[..., 7:10].clone()
+        trajectory_velocity = torch.cat(
+            (
+                trajectory_velocity,
+                torch.zeros_like(trajectory_velocity[..., :1]),
+            ),
+            dim=-1,
+        )
         size = self.dynamic_obstacle_size.view(1, 1, 3).expand(
             self.num_envs, self.num_dynamic_obstacles, -1
         )
@@ -653,7 +775,10 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         )
         return {
             'position': position,
-            'velocity': velocity,
+            'trajectory_position': trajectory_position,
+            'velocity': physical_root_velocity,
+            'physical_root_velocity': physical_root_velocity,
+            'trajectory_velocity': trajectory_velocity,
             'size': size,
             'radius': radius,
             'actor_indices': self.dynamic_obstacle_actor_indices,
@@ -668,3 +793,11 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         self.future_dynamic_rays[env_ids] = float(
             self.cfg.sensors.ray2d.max_dist
         )
+        self.dynamic_active_obstacle_id[env_ids] = -1
+        self.future_dynamic_active_obstacle_id[env_ids] = -1
+        self.current_fused_source_id[env_ids] = -1
+        self.future_fused_source_id[env_ids] = -1
+        self.source_switch_mask[env_ids] = False
+        self.same_dynamic_source_mask[env_ids] = False
+        self.active_obstacle_radial_velocity_gt[env_ids] = 0.0
+        self.active_obstacle_radial_velocity_valid_mask[env_ids] = False
