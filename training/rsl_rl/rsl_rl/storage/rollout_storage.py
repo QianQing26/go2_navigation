@@ -45,13 +45,18 @@ class RolloutStorage:
             self.actions_log_prob = None
             self.action_mean = None
             self.action_sigma = None
+            self.safety_drift = None
+            self.next_safety_drift = None
+            self.shield_rays = None
+            self.next_shield_rays = None
             self.hidden_states = None
             self.bad_masks = None
         
         def clear(self):
             self.__init__()
 
-    def __init__(self, num_envs, num_transitions_per_env, obs_shape, actions_shape, device='cpu'):
+    def __init__(self, num_envs, num_transitions_per_env, obs_shape, actions_shape,
+                 device='cpu', shield_rays_shape=(41,)):
 
         self.device = device
 
@@ -61,6 +66,20 @@ class RolloutStorage:
         # Core
         self.observations = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device)
         self.next_observations = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device)
+        self.safety_drift = torch.zeros(
+            num_transitions_per_env, num_envs, 1, device=self.device
+        )
+        self.next_safety_drift = torch.zeros(
+            num_transitions_per_env, num_envs, 1, device=self.device
+        )
+        self.shield_rays = torch.zeros(
+            num_transitions_per_env, num_envs, *shield_rays_shape,
+            device=self.device
+        )
+        self.next_shield_rays = torch.zeros(
+            num_transitions_per_env, num_envs, *shield_rays_shape,
+            device=self.device
+        )
 
         self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
@@ -90,6 +109,18 @@ class RolloutStorage:
             raise AssertionError("Rollout buffer overflow")
         self.observations[self.step].copy_(transition.observations)
         self.next_observations[self.step].copy_(transition.next_observations)
+        if transition.safety_drift is not None:
+            self.safety_drift[self.step].copy_(
+                transition.safety_drift.view(-1, 1)
+            )
+        if transition.next_safety_drift is not None:
+            self.next_safety_drift[self.step].copy_(
+                transition.next_safety_drift.view(-1, 1)
+            )
+        if transition.shield_rays is not None:
+            self.shield_rays[self.step].copy_(transition.shield_rays)
+        if transition.next_shield_rays is not None:
+            self.next_shield_rays[self.step].copy_(transition.next_shield_rays)
         self.actions[self.step].copy_(transition.actions)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
@@ -169,6 +200,10 @@ class RolloutStorage:
         old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
         advantages = self.advantages.flatten(0, 1)
         bad_masks = self.bad_masks.flatten(0, 1)
+        safety_drift = self.safety_drift.flatten(0, 1)
+        next_safety_drift = self.next_safety_drift.flatten(0, 1)
+        shield_rays = self.shield_rays.flatten(0, 1)
+        next_shield_rays = self.next_shield_rays.flatten(0, 1)
         
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -186,15 +221,16 @@ class RolloutStorage:
                 advantages_batch = advantages[batch_idx]
                 old_mu_batch = self.mu.flatten(0, 1)[batch_idx]
                 old_sigma_batch = self.sigma.flatten(0, 1)[batch_idx]
+                safety_drift_batch = safety_drift[batch_idx]
+                next_safety_drift_batch = next_safety_drift[batch_idx]
+                shield_rays_batch = shield_rays[batch_idx]
+                next_shield_rays_batch = next_shield_rays[batch_idx]
                 bad_masks_batch = bad_masks[batch_idx]
                 
                 yield obs_batch, next_obs_batch, actions_batch, \
                     target_values_batch, advantages_batch, returns_batch, \
-                    old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (None, None), None, bad_masks_batch
+                    old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, \
+                    safety_drift_batch, next_safety_drift_batch, \
+                    shield_rays_batch, next_shield_rays_batch, \
+                    (None, None), None, bad_masks_batch
    
-                       
-                
-                
-        
-
-                       

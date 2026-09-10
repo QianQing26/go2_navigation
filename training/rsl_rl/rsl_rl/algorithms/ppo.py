@@ -84,8 +84,12 @@ class PPO:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
 
-    def init_storage(self, num_envs, num_transitions_per_env, obs_shape, action_shape):
-        self.storage = RolloutStorage(num_envs, num_transitions_per_env, obs_shape, action_shape, self.device)
+    def init_storage(self, num_envs, num_transitions_per_env, obs_shape,
+                     action_shape, shield_rays_shape=(41,)):
+        self.storage = RolloutStorage(
+            num_envs, num_transitions_per_env, obs_shape, action_shape,
+            self.device, shield_rays_shape=shield_rays_shape
+        )
         
     def test_mode(self):
         self.actor_critic.test()
@@ -101,7 +105,22 @@ class PPO:
         loss_alpha = torch.mean(penalty ** 2)
         return loss_alpha
 
-    def compute_smoothness_loss(self, current_states, next_states):
+    def compute_smoothness_loss(
+        self, current_states, next_states, current_safety_drift=None,
+        next_safety_drift=None, current_shield_rays=None,
+        next_shield_rays=None,
+    ):
+        if current_safety_drift is None:
+            current_safety_drift = torch.zeros(
+                current_states.shape[0], 1, device=current_states.device,
+                dtype=current_states.dtype
+            )
+        if next_safety_drift is None:
+            next_safety_drift = torch.zeros_like(current_safety_drift)
+        if current_shield_rays is None:
+            current_shield_rays = self._observation_shield_rays(current_states)
+        if next_shield_rays is None:
+            next_shield_rays = self._observation_shield_rays(next_states)
         batch_size = current_states.size(0)
         _u = torch.rand(batch_size, 1, device=current_states.device)
         mix_weights = ((_u - 0.5) * 2.0)
@@ -109,11 +128,25 @@ class PPO:
         # s̄ = s + (s_next - s)*u
         delta_states = next_states - current_states
         interp_states = current_states + mix_weights * delta_states
+        interp_safety_drift = current_safety_drift + mix_weights * (
+            next_safety_drift - current_safety_drift
+        )
+        interp_shield_rays = current_shield_rays + mix_weights * (
+            next_shield_rays - current_shield_rays
+        )
         
         # with torch.no_grad():
-        self.actor_critic.act(current_states)
+        self.actor_critic.act(
+            current_states,
+            safety_drift=current_safety_drift,
+            shield_rays=current_shield_rays,
+        )
         orig_actions = self.actor_critic.action_mean
-        self.actor_critic.act(interp_states)
+        self.actor_critic.act(
+            interp_states,
+            safety_drift=interp_safety_drift,
+            shield_rays=interp_shield_rays,
+        )
         interp_actions = self.actor_critic.action_mean
         actor_smoothness = F.mse_loss(interp_actions, orig_actions)
         
@@ -130,22 +163,63 @@ class PPO:
         return total_loss
 
 
-    def act(self, obs, critic_obs):
+    def _observation_shield_rays(self, observations):
+        """Recover the physical rays used by the legacy actor path."""
+        if not hasattr(self.actor_critic, 'extract'):
+            return torch.zeros(
+                observations.shape[0], self.storage.shield_rays.shape[-1],
+                device=observations.device, dtype=observations.dtype
+            )
+        _, _, _, rays, _ = self.actor_critic.extract(observations)
+        return torch.exp2(rays)
+
+    def act(self, obs, critic_obs, safety_drift=None, shield_rays=None):
         if self.actor_critic.is_recurrent:
             self.transition.hidden_states = self.actor_critic.get_hidden_states()
         # Compute the actions and values
         critic_obs = obs
-        self.transition.actions = self.actor_critic.act(obs).detach()
+        supplied_context = safety_drift is not None or shield_rays is not None
+        if supplied_context:
+            if safety_drift is None:
+                safety_drift = torch.zeros(
+                    obs.shape[0], 1, device=obs.device, dtype=obs.dtype
+                )
+            if shield_rays is None:
+                shield_rays = self._observation_shield_rays(obs)
+            self.transition.actions = self.actor_critic.act(
+                obs,
+                safety_drift=safety_drift,
+                shield_rays=shield_rays,
+            ).detach()
+        else:
+            # Preserve the old actor call exactly for callers that do not use
+            # predictive context.
+            self.transition.actions = self.actor_critic.act(obs).detach()
+            safety_drift = torch.zeros(
+                obs.shape[0], 1, device=obs.device, dtype=obs.dtype
+            )
+            shield_rays = self._observation_shield_rays(obs)
         self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
         self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
         self.transition.action_mean = self.actor_critic.action_mean.detach()
         self.transition.action_sigma = self.actor_critic.action_std.detach()
         self.transition.observations = obs
         self.transition.critic_observations = critic_obs
+        self.transition.safety_drift = safety_drift.detach()
+        self.transition.shield_rays = shield_rays.detach()
         return self.transition.actions
     
-    def process_env_step(self, next_obs, rewards, dones, infos):
+    def process_env_step(
+        self, next_obs, rewards, dones, infos, next_safety_drift=None,
+        next_shield_rays=None,
+    ):
         self.transition.next_observations = next_obs
+        if next_safety_drift is None:
+            next_safety_drift = torch.zeros_like(self.transition.safety_drift)
+        if next_shield_rays is None:
+            next_shield_rays = self._observation_shield_rays(next_obs)
+        self.transition.next_safety_drift = next_safety_drift.detach()
+        self.transition.next_shield_rays = next_shield_rays.detach()
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
         if 'bad_masks' in infos:
@@ -177,11 +251,20 @@ class PPO:
             
         for obs_batch, next_obs_batch, actions_batch, \
                 target_values_batch, advantages_batch, returns_batch, \
-                old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch, bad_masks_batch in generator:
+                old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, \
+                safety_drift_batch, next_safety_drift_batch, \
+                shield_rays_batch, next_shield_rays_batch, \
+                hid_states_batch, masks_batch, bad_masks_batch in generator:
 
                 valid_mask = (~bad_masks_batch.bool()).flatten()
                 
-                self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
+                self.actor_critic.act(
+                    obs_batch,
+                    safety_drift=safety_drift_batch,
+                    shield_rays=shield_rays_batch,
+                    masks=masks_batch,
+                    hidden_states=hid_states_batch[0],
+                )
                 actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
                 value_batch = self.actor_critic.evaluate(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
                 
@@ -231,7 +314,11 @@ class PPO:
                 clip_maxs = torch.tensor([1.7,  0.8,  1.0], device=mu_batch.device)
                 range_loss = (torch.sum((mu_batch - torch.clip(mu_batch, min=clip_mins, max=clip_maxs))**2, dim=-1) * valid_mask).sum() / (valid_mask.sum() + 1e-8)
                 
-                smooth_loss = self.compute_smoothness_loss(obs_batch, next_obs_batch)
+                smooth_loss = self.compute_smoothness_loss(
+                    obs_batch, next_obs_batch, safety_drift_batch,
+                    next_safety_drift_batch, shield_rays_batch,
+                    next_shield_rays_batch,
+                )
                 regularization_loss = range_loss + 0.05 * smooth_loss
                 loss += 1.0 * regularization_loss
 

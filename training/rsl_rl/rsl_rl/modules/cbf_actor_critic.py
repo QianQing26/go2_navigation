@@ -123,10 +123,14 @@ class DifferentiableSafeActorCritic(nn.Module):
         goals = obs_buf[:, -2:]
         return obs_buf, obs_hist, props, rays, goals
 
-    def forward(self, observations):
+    def forward(self, observations, safety_drift=None, shield_rays=None):
         """
         Directly return the safety mean used to build the distribution.
         Following the original paper concept, CBF is the final layer of the network.
+
+        The actor observation remains the delayed observation history.  When
+        supplied, ``shield_rays`` is a synchronized physical-distance tensor
+        used only by the shield; it does not change the actor or critic input.
         """
         obs_buf, obs_hist, props, rays, goals = self.extract(observations)
         
@@ -141,12 +145,29 @@ class DifferentiableSafeActorCritic(nn.Module):
         alpha_raw = self.alpha_head(shared_features)
         
         # 3. Calculate adaptive parameter \alpha, using softplus to ensure \alpha > 0 mathematically
-        rays_real = torch.exp2(rays) # 0.1~3.0
+        rays_real = torch.exp2(rays) if shield_rays is None else shield_rays
+        if not isinstance(rays_real, torch.Tensor):
+            rays_real = torch.as_tensor(
+                rays_real, device=observations.device, dtype=observations.dtype
+            )
+        else:
+            rays_real = rays_real.to(
+                device=observations.device, dtype=observations.dtype
+            )
+        expected_shape = (observations.shape[0], self.num_rays)
+        if tuple(rays_real.shape) != expected_shape:
+            raise ValueError(
+                'shield_rays must have shape {}, got {}'.format(
+                    expected_shape, tuple(rays_real.shape)
+                )
+            )
         alpha = F.softplus(alpha_raw)
         self.alpha = alpha 
         
         # 4. Get u_s through differentiable safety layer
-        u_s = self.cbf_layer(u_bar, rays_real, alpha)
+        u_s = self.cbf_layer(
+            u_bar, rays_real, alpha, safety_drift=safety_drift
+        )
         
         # Save u_bar and u_s for calculating Intervention Loss
         self.u_bar = u_bar
@@ -154,13 +175,22 @@ class DifferentiableSafeActorCritic(nn.Module):
         
         return u_s
     
-    def update_distribution(self, observations):
-        mean = self.forward(observations)
+    def update_distribution(self, observations, safety_drift=None, shield_rays=None, **kwargs):
+        mean = self.forward(
+            observations,
+            safety_drift=safety_drift,
+            shield_rays=shield_rays,
+        )
         self.distribution = Normal(mean, mean*0. + self.std)
         self.mean = mean
 
     def act(self, observations, **kwargs):
-        self.update_distribution(observations)
+        self.update_distribution(
+            observations,
+            safety_drift=kwargs.pop('safety_drift', None),
+            shield_rays=kwargs.pop('shield_rays', None),
+            **kwargs
+        )
         actions = self.distribution.sample()
         return actions
 
@@ -177,7 +207,11 @@ class DifferentiableSafeActorCritic(nn.Module):
     
     def act_inference(self, observations, **kwargs):
         """ Used effectively during evaluation or deployment, without exploration noise """
-        u_s = self.forward(observations)
+        u_s = self.forward(
+            observations,
+            safety_drift=kwargs.pop('safety_drift', None),
+            shield_rays=kwargs.pop('shield_rays', None),
+        )
         return u_s
 
 

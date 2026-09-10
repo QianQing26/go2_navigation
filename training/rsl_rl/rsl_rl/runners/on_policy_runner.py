@@ -31,6 +31,7 @@
 import time
 import os
 import csv
+import sys
 from collections import deque
 import statistics
 
@@ -44,6 +45,21 @@ from rsl_rl.env import VecEnv
 from rsl_rl.algorithms.ppo import PPO
 from rsl_rl.modules.actor_critic import ActorCritic
 from rsl_rl.modules.cbf_actor_critic import DifferentiableSafeActorCritic
+
+try:
+    from motion_estimator.runtime import PredictiveDriftRuntime
+except ModuleNotFoundError:
+    # Training entrypoints are often launched with only the two legacy
+    # ``training/*`` roots on sys.path.  Add the repository root without
+    # duplicating any estimator implementation in rsl_rl.
+    _repository_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), '../../../..')
+    )
+    if _repository_root not in sys.path:
+        sys.path.insert(0, _repository_root)
+    from motion_estimator.runtime import PredictiveDriftRuntime
+
+
 class OnPolicyRunner:
 
     def __init__(self,
@@ -81,7 +97,51 @@ class OnPolicyRunner:
 
         
         self.alg.init_storage(num_envs=self.env.num_envs, num_transitions_per_env=self.num_steps_per_env, 
-                obs_shape=[num_obs], action_shape=[num_nav_actions])
+                obs_shape=[num_obs], action_shape=[num_nav_actions],
+                shield_rays_shape=[num_rays])
+
+        self.safety_mode = 'original'
+        self.predictive_runtime = None
+        safety_cfg = getattr(self.env.cfg.env, 'predictive_safety', None)
+        if safety_cfg is not None:
+            self.safety_mode = str(getattr(safety_cfg, 'mode', 'original')).lower()
+        valid_modes = {
+            'original', 'synchronized_static', 'predictive',
+            'predictive_calibrated',
+        }
+        if self.safety_mode not in valid_modes:
+            raise ValueError(
+                'Unknown predictive safety mode {!r}; choose one of {}'.format(
+                    self.safety_mode, sorted(valid_modes)
+                )
+            )
+        if self.safety_mode in {'predictive', 'predictive_calibrated'}:
+            if safety_cfg is None:
+                raise ValueError('Predictive mode requires env.predictive_safety config')
+            checkpoint = str(getattr(safety_cfg, 'estimator_checkpoint', '')).strip()
+            if not checkpoint:
+                raise ValueError(
+                    'Predictive mode requires env.predictive_safety.estimator_checkpoint'
+                )
+            if not os.path.isabs(os.path.expanduser(checkpoint)):
+                checkpoint = os.path.abspath(
+                    os.path.join(
+                        os.path.dirname(__file__), '../../../..', checkpoint
+                    )
+                )
+            calibration_delta = float(
+                getattr(safety_cfg, 'calibration_delta', 0.0)
+            )
+            if self.safety_mode == 'predictive':
+                calibration_delta = 0.0
+            self.predictive_runtime = PredictiveDriftRuntime(
+                checkpoint_path=checkpoint,
+                device=self.device,
+                calibration_delta=calibration_delta,
+                use_warmup_gate=bool(
+                    getattr(safety_cfg, 'use_warmup_gate', True)
+                ),
+            )
         
         self.log_dir = log_dir
         self.writer = None
@@ -116,6 +176,7 @@ class OnPolicyRunner:
         self._log(
             '[runner] log_dir={}'.format(self.log_dir)
         )
+        self._log('[runner] safety_mode={}'.format(self.safety_mode))
         self._log(
             '[runner] resetting environment: num_envs={}, steps_per_env={}'.format(
                 self.env.num_envs, self.num_steps_per_env
@@ -123,6 +184,34 @@ class OnPolicyRunner:
         )
         _, _ = self.env.reset()
         self._log('[runner] environment reset complete')
+
+    def _legacy_shield_rays(self, obs):
+        """Reconstruct the exact physical rays from the actor observation."""
+        one_step = int(self.env.cfg.env.num_obs_one_step)
+        latest = obs[:, -one_step:]
+        rays = latest[:, self.env.num_props:self.env.num_props + self.env.rays.shape[1]]
+        return torch.exp2(rays)
+
+    def build_safety_context(self, obs):
+        """Return physical ``(drift, shield_rays)`` for the current step."""
+        zeros = torch.zeros(
+            self.env.num_envs, 1, device=obs.device, dtype=obs.dtype
+        )
+        if self.safety_mode == 'original':
+            return zeros, self._legacy_shield_rays(obs)
+        if self.safety_mode == 'synchronized_static':
+            return zeros, self.env.rays_hist[:, -1, :].to(
+                device=obs.device, dtype=obs.dtype
+            ).clone()
+        drift, rays = self.predictive_runtime.update(self.env)
+        return (
+            drift.to(device=obs.device, dtype=obs.dtype),
+            rays.to(device=obs.device, dtype=obs.dtype),
+        )
+
+    def reset_safety_context(self, env_ids=None):
+        if self.predictive_runtime is not None:
+            self.predictive_runtime.reset(env_ids)
 
     def _log(self, message):
         """Print a flushed message and mirror it into the current run log."""
@@ -173,6 +262,7 @@ class OnPolicyRunner:
         critic_obs = privileged_obs if privileged_obs is not None else obs
         obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
         self.alg.actor_critic.train() # switch to train mode (for dropout for example)
+        safety_drift, shield_rays = self.build_safety_context(obs)
 
         ep_infos = []
         rewbuffer = deque(maxlen=100)
@@ -192,11 +282,21 @@ class OnPolicyRunner:
             )
             with torch.no_grad():
                 for i in range(self.num_steps_per_env):
-                    actions = self.alg.act(obs, critic_obs)
+                    actions = self.alg.act(
+                        obs, critic_obs, safety_drift=safety_drift,
+                        shield_rays=shield_rays,
+                    )
                     obs, privileged_obs, rewards, dones, infos = self.env.step(actions)
                     critic_obs = privileged_obs if privileged_obs is not None else obs
                     obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
-                    self.alg.process_env_step(obs, rewards, dones, infos)
+                    self.reset_safety_context(dones)
+                    next_safety_drift, next_shield_rays = self.build_safety_context(obs)
+                    self.alg.process_env_step(
+                        obs, rewards, dones, infos,
+                        next_safety_drift=next_safety_drift,
+                        next_shield_rays=next_shield_rays,
+                    )
+                    safety_drift, shield_rays = next_safety_drift, next_shield_rays
                     if self.log_dir is not None:
                         # Book keeping
                         if 'episode' in infos:

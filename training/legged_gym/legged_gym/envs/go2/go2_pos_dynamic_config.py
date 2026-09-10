@@ -6,6 +6,16 @@ from .go2_pos_config import Go2PosRoughCfg, Go2PosRoughCfgPPO
 class Go2PosDynamicCfg(Go2PosRoughCfg):
     """First-stage dynamic-obstacle navigation configuration."""
 
+    class env(Go2PosRoughCfg.env):
+        class predictive_safety:
+            # Phase-1 defaults to the historical delayed-ray shield.  The
+            # frozen estimator modes are selected explicitly for evaluation or
+            # an experiment config, so existing training remains unchanged.
+            mode = 'original'
+            estimator_checkpoint = ''
+            calibration_delta = 0.0
+            use_warmup_gate = True
+
     class terrain(Go2PosRoughCfg.terrain):
         # Keep a simple room as a static backdrop; moving boxes are the main
         # additional obstacles in this task.
