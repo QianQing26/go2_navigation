@@ -1,6 +1,11 @@
 """Configuration for the isolated dynamic-obstacle Go2 task."""
 
 from .go2_pos_config import Go2PosRoughCfg, Go2PosRoughCfgPPO
+from rsl_rl.utils.phase2 import (
+    PHASE2_SPEED_FINAL,
+    PHASE2_SPEED_START,
+    PHASE2_SPEED_STEPS,
+)
 
 
 class Go2PosDynamicCfg(Go2PosRoughCfg):
@@ -32,16 +37,13 @@ class Go2PosDynamicCfg(Go2PosRoughCfg):
         # The room is 10 m wide; using the central 8 m x 7 m region avoids
         # the boundary walls while preventing overly dense initial layouts.
         bounds = [[-4.0, 4.0], [-3.5, 3.5]]
-        # Final curriculum range.  The previous 2.5 m/s upper bound was too
-        # aggressive for the first dynamic-obstacle fine-tuning stage.
-        speed_range = [0.5, 1.5]
+        # Phase-2 pilot support: keep the lower bound at 0.1 m/s and expand
+        # the upper bound from 0.5 to 1.5 m/s over the shared curriculum.
+        speed_range = list(PHASE2_SPEED_FINAL)
         class curriculum:
             enabled = True
-            # Start close to the easy diagnostic setting and reach
-            # ``speed_range`` after roughly one 2k-iteration run with the
-            # default 48-step PPO rollout.
-            speed_start = [0.2, 0.5]
-            speed_steps = 50000
+            speed_start = list(PHASE2_SPEED_START)
+            speed_steps = PHASE2_SPEED_STEPS
         min_robot_distance = 1.2
         min_goal_distance = 0.8
         obstacle_clearance = 0.1
@@ -51,6 +53,8 @@ class Go2PosDynamicCfg(Go2PosRoughCfg):
     class motion_estimation:
         # Counterfactual horizon aligned with the 10 Hz exteroception rate.
         gt_horizon = 0.1
+        gt_d_safe = 0.20
+        gt_kappa = 10.0
 
     class replay(Go2PosRoughCfg.replay):
         # The existing replay buffer stores only robot state, not obstacle
@@ -63,3 +67,6 @@ class Go2PosDynamicCfg(Go2PosRoughCfg):
 class Go2PosDynamicCfgPPO(Go2PosRoughCfgPPO):
     class runner(Go2PosRoughCfgPPO.runner):
         experiment_name = 'go2_pos_dynamic'
+        # Phase-2 starts with a deliberately bounded pilot.  A continuation
+        # run must explicitly override this target to 2000 with --resume.
+        max_iterations = 350

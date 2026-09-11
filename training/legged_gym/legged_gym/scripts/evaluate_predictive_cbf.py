@@ -27,6 +27,11 @@ from isaacgym import gymapi  # noqa: F401 - initialize Isaac Gym before torch
 from legged_gym.envs import *  # noqa: F401,F403 - register tasks
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.utils import get_args, task_registry
+from rsl_rl.utils.phase2 import (
+    classify_terminal_outcome,
+    outcome_rates,
+    snapshot_control_context,
+)
 
 import torch
 
@@ -36,6 +41,23 @@ MODES = {
     'original', 'synchronized_static', 'predictive',
     'predictive_calibrated',
 }
+
+
+def _outcome_fields(collision, goal_reached, timeout, stuck):
+    """Convert raw simulator flags into mutually-exclusive report fields."""
+
+    outcome = classify_terminal_outcome(
+        collision, goal_reached, timeout, stuck
+    )
+    return {
+        'goal_reached': int(bool(goal_reached)),
+        'collision_failure': int(outcome == 'collision_failure'),
+        'safe_success': int(outcome == 'safe_success'),
+        'timeout_failure': int(outcome == 'timeout_failure'),
+        'stuck_failure': int(outcome == 'stuck_failure'),
+        'other_failure': int(outcome == 'other_failure'),
+        'terminal_outcome': outcome,
+    }
 
 
 def _parse_script_args():
@@ -222,18 +244,11 @@ def evaluate(args, script_args):
                 safety_drift=safety_drift,
                 shield_rays=shield_rays,
             )
-
-            diag = {
-                'h_comp': layer.last_h_comp.reshape(-1),
-                'safety_drift': layer.last_safety_drift.reshape(-1),
-                'Lgh_u': layer.last_Lgh_u.reshape(-1),
-                'alpha_h': layer.last_alpha_h.reshape(-1),
-                'residual': layer.last_nominal_barrier_residual.reshape(-1),
-                'eta': layer.last_eta.reshape(-1),
-                'intervention_norm': layer.last_intervention_norm.reshape(-1),
-            }
-            intervention = diag['intervention_norm']
-            residual = diag['residual']
+            context = snapshot_control_context(
+                env, safety_drift, shield_rays, layer
+            )
+            intervention = context['intervention_norm']
+            residual = context['residual']
             active = intervention > 1.0e-6
             total_intervention += float(intervention.sum())
             total_active += int(active.sum())
@@ -254,8 +269,6 @@ def evaluate(args, script_args):
             )
             previous_positions = new_positions
 
-            updated = _bool_list(env.exteroception_updated_mask)
-            counts = env.exteroception_history_count.detach().cpu().tolist()
             collision_flags = _bool_list(env.collision_occurred)
             success_flags = _bool_list(env.goal_reached_flag)
             timeout_flags = _bool_list(env.time_out_buf)
@@ -274,18 +287,22 @@ def evaluate(args, script_args):
                     'env_id': env_id,
                     'episode_id': int(episode_ids[env_id]),
                     'episode_step': int(episode_steps[env_id]),
-                    'exteroception_updated': int(updated[env_id]),
-                    'history_count': int(counts[env_id]),
-                    'h_comp': float(diag['h_comp'][env_id]),
-                    'safety_drift': float(diag['safety_drift'][env_id]),
-                    'Lgh_u': float(diag['Lgh_u'][env_id]),
-                    'alpha_h': float(diag['alpha_h'][env_id]),
-                    'residual': float(diag['residual'][env_id]),
-                    'eta': float(diag['eta'][env_id]),
-                    'intervention_norm': float(diag['intervention_norm'][env_id]),
+                    'exteroception_updated': int(context['exteroception_updated'][env_id]),
+                    'history_count': int(context['history_count'][env_id]),
+                    'shield_rays_min': float(context['shield_rays_min'][env_id]),
+                    'shield_rays_max': float(context['shield_rays_max'][env_id]),
+                    'h_comp': float(context['h_comp'][env_id]),
+                    'safety_drift': float(context['safety_drift'][env_id]),
+                    'Lgh_u': float(context['Lgh_u'][env_id]),
+                    'alpha_h': float(context['alpha_h'][env_id]),
+                    'residual': float(context['residual'][env_id]),
+                    'eta': float(context['eta'][env_id]),
+                    'intervention_norm': float(context['intervention_norm'][env_id]),
                     'done': int(terminal_mask[env_id]),
                     'collision': int(collision_flags[env_id]),
                     'success': int(success_flags[env_id]),
+                    'goal_reached': int(success_flags[env_id]),
+                    'safe_success': int(success_flags[env_id] and not collision_flags[env_id]),
                     'timeout': int(timeout_flags[env_id] or forced_flags[env_id]),
                     'stuck': int(stuck_flags[env_id]),
                     'terminate': int(terminate_flags[env_id]),
@@ -306,13 +323,20 @@ def evaluate(args, script_args):
                     'reward': float(episode_rewards[env_id]),
                     'distance_m': float(episode_distance[env_id]),
                     'mean_speed_mps': float(episode_distance[env_id]) / max(length * dt, 1.0e-6),
-                    'success': int(success_flags[env_id]),
+                    'success': 0,
                     'collision': int(collision_flags[env_id]),
                     'timeout': int(timeout_flags[env_id] or forced_flags[env_id]),
                     'stuck': int(stuck_flags[env_id]),
                     'terminate': int(terminate_flags[env_id]),
                     'forced_limit': int(forced_flags[env_id]),
                 }
+                record.update(_outcome_fields(
+                    collision_flags[env_id],
+                    success_flags[env_id],
+                    timeout_flags[env_id] or forced_flags[env_id],
+                    stuck_flags[env_id],
+                ))
+                record['success'] = record['safe_success']
                 episodes.append(record)
                 episode_ids[env_id] += num_envs
                 episode_steps[env_id] = 0
@@ -353,6 +377,7 @@ def evaluate(args, script_args):
                     'stuck': 0,
                     'terminate': 0,
                     'forced_limit': 1,
+                    **_outcome_fields(False, False, True, False),
                 })
 
     episodes = episodes[:script_args.num_episodes]
@@ -363,9 +388,11 @@ def evaluate(args, script_args):
     ]
     timeseries_fields = [
         'global_step', 'env_id', 'episode_id', 'episode_step',
-        'exteroception_updated', 'history_count', 'h_comp', 'safety_drift',
+        'exteroception_updated', 'history_count', 'shield_rays_min',
+        'shield_rays_max', 'h_comp', 'safety_drift',
         'Lgh_u', 'alpha_h', 'residual', 'eta', 'intervention_norm', 'done',
-        'collision', 'success', 'timeout', 'stuck', 'terminate', 'forced_limit',
+        'collision', 'success', 'goal_reached', 'safe_success', 'timeout',
+        'stuck', 'terminate', 'forced_limit',
     ]
     _write_csv(os.path.join(output_dir, 'episodes.csv'), episodes, episode_fields)
     _write_csv(os.path.join(output_dir, 'timeseries.csv'), timeseries, timeseries_fields)
@@ -374,6 +401,11 @@ def evaluate(args, script_args):
 
     def mean_field(name):
         return sum(float(row[name]) for row in episodes) / max(len(episodes), 1)
+
+    outcome_summary = outcome_rates(
+        [row['terminal_outcome'] for row in episodes]
+    )
+    outcome_rates_report = outcome_summary['rates']
 
     summary = {
         'task': TASK_NAME,
@@ -390,10 +422,18 @@ def evaluate(args, script_args):
         'episodes_requested': script_args.num_episodes,
         'episodes_completed_or_forced': len(episodes),
         'control_dt_s': dt,
-        'success_rate': mean_field('success'),
-        'collision_rate': mean_field('collision'),
-        'timeout_rate': mean_field('timeout'),
-        'stuck_rate': mean_field('stuck'),
+        # ``success_rate`` is the formal safe-success rate.  The raw goal
+        # reached rate remains available for diagnosing goal/collision ties.
+        'success_rate': outcome_rates_report['safe_success'],
+        'safe_success_rate': outcome_rates_report['safe_success'],
+        'goal_reached_rate': mean_field('goal_reached'),
+        'collision_rate': outcome_rates_report['collision_failure'],
+        'timeout_rate': outcome_rates_report['timeout_failure'],
+        'stuck_rate': outcome_rates_report['stuck_failure'],
+        'other_failure_rate': outcome_rates_report['other_failure'],
+        'terminal_outcome_counts': outcome_summary['counts'],
+        'terminal_outcome_rates': outcome_rates_report,
+        'terminal_outcome_rate_sum': outcome_summary['total_rate'],
         'mean_episode_length': mean_field('length'),
         'mean_speed_mps': mean_field('mean_speed_mps'),
         'intervention_frequency': total_active / max(total_samples, 1),

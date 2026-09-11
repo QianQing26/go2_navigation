@@ -166,8 +166,22 @@ class OnPolicyRunner:
                         'iteration', 'timesteps', 'collection_sec', 'learning_sec',
                         'fps', 'rollout_mean_reward', 'episodes_completed',
                         'mean_episode_reward', 'mean_episode_length',
+                        'collision_reward', 'termination_reward',
                         'value_loss', 'surrogate_loss', 'regularization_loss',
                         'smooth_loss', 'interv_loss',
+                        'intervention_frequency', 'mean_intervention_norm',
+                        'max_intervention_norm', 'residual_negative_probability',
+                        'mean_safety_drift', 'negative_drift_rate',
+                        'drift_induced_intervention',
+                        'estimator_online_mae', 'estimator_online_rmse',
+                        'estimator_online_sign_accuracy',
+                        'estimator_online_false_safe_rate',
+                        'estimator_online_optimistic_danger_rate',
+                        'estimator_online_dangerous_count',
+                        'estimator_online_count', 'curriculum_progress',
+                        'configured_speed_min', 'configured_speed_max',
+                        'obstacle_speed_mean', 'obstacle_speed_p50',
+                        'obstacle_speed_p90', 'obstacle_speed_max',
                     ])
         self.tot_timesteps = 0
         self.tot_time = 0
@@ -213,6 +227,141 @@ class OnPolicyRunner:
         if self.predictive_runtime is not None:
             self.predictive_runtime.reset(env_ids)
 
+    @staticmethod
+    def _new_rollout_safety_stats():
+        return {
+            'samples': 0,
+            'interventions': 0,
+            'norm_sum': 0.0,
+            'norm_max': 0.0,
+            'residual_negative': 0,
+            'drift_sum': 0.0,
+            'negative_drift': 0,
+            'drift_induced_intervention': 0,
+            'online_count': 0,
+            'online_abs_error_sum': 0.0,
+            'online_squared_error_sum': 0.0,
+            'online_sign_correct': 0,
+            'online_sign_count': 0,
+            'online_dangerous_count': 0,
+            'online_false_safe_count': 0,
+            'online_optimistic_danger_count': 0,
+        }
+
+    def _record_rollout_safety_stats(self, stats, safety_drift):
+        """Accumulate detached diagnostics without entering autograd."""
+
+        layer = getattr(self.alg.actor_critic, 'cbf_layer', None)
+        if layer is None or not hasattr(layer, 'last_intervention_norm'):
+            return
+        with torch.no_grad():
+            intervention = layer.last_intervention_norm.reshape(-1).detach()
+            residual = layer.last_nominal_barrier_residual.reshape(-1).detach()
+            static_residual = (
+                layer.last_Lgh_u.reshape(-1) + layer.last_alpha_h.reshape(-1)
+            ).detach()
+            drift = safety_drift.reshape(-1).detach()
+            samples = int(intervention.numel())
+            stats['samples'] += samples
+            stats['interventions'] += int((intervention > 1.0e-6).sum())
+            stats['norm_sum'] += float(intervention.sum())
+            stats['norm_max'] = max(stats['norm_max'], float(intervention.max()))
+            stats['residual_negative'] += int((residual < 0.0).sum())
+            stats['drift_sum'] += float(drift.sum())
+            stats['negative_drift'] += int((drift < 0.0).sum())
+            stats['drift_induced_intervention'] += int(
+                ((static_residual >= 0.0) & (static_residual + drift < 0.0)).sum()
+            )
+
+            runtime = self.predictive_runtime
+            gt = getattr(self.env, 'lse_drift_gt', None)
+            if self.safety_mode != 'predictive' or runtime is None or gt is None:
+                return
+            inference_mask = runtime.last_inference_mask
+            if inference_mask is None or not bool(inference_mask.any()):
+                return
+            pred = drift[inference_mask.reshape(-1)]
+            target = gt.reshape(-1).detach()[inference_mask.reshape(-1)]
+            finite = torch.isfinite(pred) & torch.isfinite(target)
+            pred, target = pred[finite], target[finite]
+            if pred.numel() == 0:
+                return
+            error = pred - target
+            stats['online_count'] += int(pred.numel())
+            stats['online_abs_error_sum'] += float(error.abs().sum())
+            stats['online_squared_error_sum'] += float(error.square().sum())
+            sign_mask = target.abs() > 0.05
+            stats['online_sign_correct'] += int(
+                (torch.sign(pred[sign_mask]) == torch.sign(target[sign_mask])).sum()
+            )
+            stats['online_sign_count'] += int(sign_mask.sum())
+            dangerous = target < -0.05
+            stats['online_dangerous_count'] += int(dangerous.sum())
+            stats['online_false_safe_count'] += int((pred[dangerous] >= 0.0).sum())
+            stats['online_optimistic_danger_count'] += int(
+                (pred[dangerous] > target[dangerous] + 0.1).sum()
+            )
+
+    def _rollout_safety_metrics(self, stats):
+        samples = max(stats['samples'], 1)
+        online_count = stats['online_count']
+        sign_count = stats['online_sign_count']
+        dangerous_count = stats['online_dangerous_count']
+        return {
+            'intervention_frequency': stats['interventions'] / samples,
+            'mean_intervention_norm': stats['norm_sum'] / samples,
+            'max_intervention_norm': stats['norm_max'],
+            'residual_negative_probability': stats['residual_negative'] / samples,
+            'mean_safety_drift': stats['drift_sum'] / samples,
+            'negative_drift_rate': stats['negative_drift'] / samples,
+            'drift_induced_intervention': stats['drift_induced_intervention'] / samples,
+            'estimator_online_mae': (
+                stats['online_abs_error_sum'] / online_count if online_count else 0.0
+            ),
+            'estimator_online_rmse': (
+                (stats['online_squared_error_sum'] / online_count) ** 0.5
+                if online_count else 0.0
+            ),
+            'estimator_online_sign_accuracy': (
+                stats['online_sign_correct'] / sign_count if sign_count else 0.0
+            ),
+            'estimator_online_false_safe_rate': (
+                stats['online_false_safe_count'] / dangerous_count
+                if dangerous_count else 0.0
+            ),
+            'estimator_online_optimistic_danger_rate': (
+                stats['online_optimistic_danger_count'] / dangerous_count
+                if dangerous_count else 0.0
+            ),
+            'estimator_online_dangerous_count': dangerous_count,
+            'estimator_online_count': online_count,
+        }
+
+    def _curriculum_metrics(self):
+        curriculum = getattr(self.env, 'get_dynamic_obstacle_curriculum', None)
+        speed_stats = getattr(self.env, 'get_dynamic_obstacle_speed_statistics', None)
+        if curriculum is None or speed_stats is None:
+            return {
+                'curriculum_progress': 0.0,
+                'configured_speed_min': 0.0,
+                'configured_speed_max': 0.0,
+                'obstacle_speed_mean': 0.0,
+                'obstacle_speed_p50': 0.0,
+                'obstacle_speed_p90': 0.0,
+                'obstacle_speed_max': 0.0,
+            }
+        current = curriculum()
+        actual = speed_stats()
+        return {
+            'curriculum_progress': float(current['progress']),
+            'configured_speed_min': float(current['speed_min']),
+            'configured_speed_max': float(current['speed_max']),
+            'obstacle_speed_mean': float(actual['mean']),
+            'obstacle_speed_p50': float(actual['p50']),
+            'obstacle_speed_p90': float(actual['p90']),
+            'obstacle_speed_max': float(actual['max']),
+        }
+
     def _log(self, message):
         """Print a flushed message and mirror it into the current run log."""
 
@@ -231,6 +380,20 @@ class OnPolicyRunner:
         mean_episode_length = (
             statistics.mean(locs['lenbuffer']) if episodes_completed else float('nan')
         )
+        def mean_episode_info(key):
+            values = []
+            for episode_info in locs['ep_infos']:
+                if key not in episode_info:
+                    continue
+                value = episode_info[key]
+                if isinstance(value, torch.Tensor):
+                    values.append(float(value.detach().float().mean()))
+                else:
+                    values.append(float(value))
+            return statistics.mean(values) if values else float('nan')
+
+        safety_metrics = locs['rollout_safety_metrics']
+        curriculum_metrics = locs['curriculum_metrics']
         iteration_time = locs['collection_time'] + locs['learn_time']
         fps = int(self.num_steps_per_env * self.env.num_envs / iteration_time) if iteration_time > 0 else 0
         with open(self.metrics_file, 'a', newline='') as metrics_file:
@@ -244,11 +407,34 @@ class OnPolicyRunner:
                 episodes_completed,
                 mean_episode_reward,
                 mean_episode_length,
+                mean_episode_info('rew_collision'),
+                mean_episode_info('rew_termination'),
                 locs['mean_value_loss'],
                 locs['mean_surrogate_loss'],
                 locs['mean_regularization_loss'],
                 locs['mean_smooth_loss'],
                 locs['mean_interv_loss'],
+                safety_metrics['intervention_frequency'],
+                safety_metrics['mean_intervention_norm'],
+                safety_metrics['max_intervention_norm'],
+                safety_metrics['residual_negative_probability'],
+                safety_metrics['mean_safety_drift'],
+                safety_metrics['negative_drift_rate'],
+                safety_metrics['drift_induced_intervention'],
+                safety_metrics['estimator_online_mae'],
+                safety_metrics['estimator_online_rmse'],
+                safety_metrics['estimator_online_sign_accuracy'],
+                safety_metrics['estimator_online_false_safe_rate'],
+                safety_metrics['estimator_online_optimistic_danger_rate'],
+                safety_metrics['estimator_online_dangerous_count'],
+                safety_metrics['estimator_online_count'],
+                curriculum_metrics['curriculum_progress'],
+                curriculum_metrics['configured_speed_min'],
+                curriculum_metrics['configured_speed_max'],
+                curriculum_metrics['obstacle_speed_mean'],
+                curriculum_metrics['obstacle_speed_p50'],
+                curriculum_metrics['obstacle_speed_p90'],
+                curriculum_metrics['obstacle_speed_max'],
             ])
     
     def learn(self, num_learning_iterations, init_at_random_ep_len=False, config=None):
@@ -274,6 +460,7 @@ class OnPolicyRunner:
         # self.num_steps_per_env = 1
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
+            rollout_safety_stats = self._new_rollout_safety_stats()
             mean_num_sim = 0
             self._log(
                 '[runner] iteration {}/{} rollout start'.format(
@@ -285,6 +472,9 @@ class OnPolicyRunner:
                     actions = self.alg.act(
                         obs, critic_obs, safety_drift=safety_drift,
                         shield_rays=shield_rays,
+                    )
+                    self._record_rollout_safety_stats(
+                        rollout_safety_stats, safety_drift
                     )
                     obs, privileged_obs, rewards, dones, infos = self.env.step(actions)
                     critic_obs = privileged_obs if privileged_obs is not None else obs
@@ -299,7 +489,7 @@ class OnPolicyRunner:
                     safety_drift, shield_rays = next_safety_drift, next_shield_rays
                     if self.log_dir is not None:
                         # Book keeping
-                        if 'episode' in infos:
+                        if 'episode' in infos and bool(dones.any()):
                             ep_infos.append(infos['episode'])
                         cur_reward_sum += rewards
                         cur_episode_length += 1
@@ -330,6 +520,8 @@ class OnPolicyRunner:
             self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
             self.tot_time += collection_time + learn_time
             rollout_mean_reward = float(self.alg.storage.rewards.mean().item())
+            rollout_safety_metrics = self._rollout_safety_metrics(rollout_safety_stats)
+            curriculum_metrics = self._curriculum_metrics()
             locs = locals()
             self._write_metrics(locs)
 
@@ -344,8 +536,12 @@ class OnPolicyRunner:
             self.tensorboard_log(locals())
             if self.log_dir is not None and it % 10 == 0:
                 self.print_log(locals(), extra=True)
-            if self.log_dir is not None and it % self.save_interval == 0 and it > self.current_learning_iteration:
-                self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
+            checkpoint_iteration = it + 1
+            if self.log_dir is not None and checkpoint_iteration % self.save_interval == 0:
+                self.save(
+                    os.path.join(self.log_dir, 'model_{}.pt'.format(checkpoint_iteration)),
+                    iteration=checkpoint_iteration,
+                )
             ep_infos.clear()
         
         self.current_learning_iteration += num_learning_iterations
@@ -374,6 +570,22 @@ class OnPolicyRunner:
             max(locs['collection_time'] + locs['learn_time'], 1e-9),
             step,
         )
+
+        safety_metrics = locs['rollout_safety_metrics']
+        curriculum_metrics = locs['curriculum_metrics']
+        for name in (
+            'intervention_frequency', 'mean_intervention_norm',
+            'max_intervention_norm', 'residual_negative_probability',
+            'mean_safety_drift', 'negative_drift_rate',
+            'drift_induced_intervention', 'estimator_online_mae',
+            'estimator_online_rmse', 'estimator_online_sign_accuracy',
+            'estimator_online_false_safe_rate',
+            'estimator_online_optimistic_danger_rate',
+            'estimator_online_dangerous_count', 'estimator_online_count',
+        ):
+            self.writer.add_scalar('Safety/{}'.format(name), safety_metrics[name], step)
+        for name, value in curriculum_metrics.items():
+            self.writer.add_scalar('Curriculum/{}'.format(name), value, step)
 
         if len(locs['rewbuffer']) > 0:
             self.writer.add_scalar(
@@ -445,11 +657,14 @@ class OnPolicyRunner:
 
         self._log(log_string.rstrip())
 
-    def save(self, path, infos=None):
+    def save(self, path, infos=None, iteration=None):
         torch.save({
             'model_state_dict': self.alg.actor_critic.state_dict(),
             'optimizer_state_dict': self.alg.optimizer.state_dict(),
-            'iter': self.current_learning_iteration,
+            'iter': (
+                self.current_learning_iteration
+                if iteration is None else int(iteration)
+            ),
             'infos': infos,
             }, path)
 
@@ -460,6 +675,20 @@ class OnPolicyRunner:
             self.alg.optimizer.load_state_dict(loaded_dict['optimizer_state_dict'])
         self.current_learning_iteration = loaded_dict['iter']
         return loaded_dict['infos']
+
+    def load_weights(self, path):
+        """Initialize policy weights while retaining a fresh PPO optimizer."""
+
+        loaded_dict = torch.load(path, map_location=self.device)
+        self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
+        # Keep this method correct even if a caller reuses a runner object:
+        # weights-only initialization must never carry Adam moments from an
+        # earlier run or from the source checkpoint.
+        self.alg.optimizer.state.clear()
+        if hasattr(self.alg, 'penalty_optimizer'):
+            self.alg.penalty_optimizer.state.clear()
+        self.current_learning_iteration = 0
+        return loaded_dict.get('infos')
 
     def get_inference_policy(self, device=None):
         self.alg.actor_critic.eval() # switch to evaluation mode (dropout for example)

@@ -29,6 +29,7 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 import os
+import json
 from datetime import datetime
 from typing import Tuple, Dict, Union
 import torch
@@ -176,34 +177,97 @@ class TaskRegistry():
             print("[task_registry] log_dir={}".format(log_dir), flush=True)
         runner = runner_class(env, train_cfg_dict, log_dir, args=args, device=args.rl_device)
 
-        pretrained_path = getattr(args, 'pretrained_path', None)
-        if pretrained_path:
-            pretrained_path = os.path.abspath(os.path.expanduser(pretrained_path))
-            if not os.path.isfile(pretrained_path):
+        init_policy_path = getattr(args, 'init_policy_path', None)
+        legacy_pretrained_path = getattr(args, 'pretrained_path', None)
+        if init_policy_path and legacy_pretrained_path:
+            raise ValueError(
+                'Use only one of --init_policy_path and --pretrained_path'
+            )
+        init_policy_path = init_policy_path or legacy_pretrained_path
+        loaded_resume_path = None
+        if init_policy_path:
+            init_policy_path = os.path.abspath(os.path.expanduser(init_policy_path))
+            if not os.path.isfile(init_policy_path):
                 raise FileNotFoundError(
-                    "Pretrained checkpoint not found: {}".format(pretrained_path)
+                    "Initial policy checkpoint not found: {}".format(init_policy_path)
                 )
-            if getattr(args, 'resume', False):
-                print(
-                    "[task_registry] --pretrained_path is set; ignoring --resume",
-                    flush=True,
+            if getattr(args, 'resume', False) or train_cfg.runner.resume:
+                raise ValueError(
+                    '--init_policy_path/--pretrained_path cannot be combined '
+                    'with --resume; choose weights-only initialization or resume'
                 )
             print(
-                "[task_registry] loading pretrained weights (optimizer reset): {}".format(
-                    pretrained_path
+                "[task_registry] loading initial policy weights only (fresh optimizer): {}".format(
+                    init_policy_path
                 ),
                 flush=True,
             )
-            runner.load(pretrained_path, load_optimizer=False)
-            # A pretrained checkpoint initializes the policy only. Fine-tuning
-            # starts a fresh dynamic-task run and iteration counter.
-            runner.current_learning_iteration = 0
+            runner.load_weights(init_policy_path)
         elif train_cfg.runner.resume:
             # load previously trained model
-            resume_path = get_load_path(log_root, load_run=train_cfg.runner.load_run, checkpoint=train_cfg.runner.checkpoint)
-            self.loaded_policy_path = resume_path
-            print(f"Loading model from: {resume_path}")
-            runner.load(resume_path)
+            loaded_resume_path = get_load_path(
+                log_root,
+                load_run=train_cfg.runner.load_run,
+                checkpoint=train_cfg.runner.checkpoint,
+            )
+            self.loaded_policy_path = loaded_resume_path
+            print('[task_registry] loading model with optimizer state: {}'.format(
+                loaded_resume_path
+            ), flush=True)
+            runner.load(loaded_resume_path, load_optimizer=True)
+
+        if log_dir is not None:
+            safety_cfg = getattr(getattr(env.cfg, 'env', None), 'predictive_safety', None)
+            obstacle_cfg = getattr(env.cfg, 'dynamic_obstacles', None)
+            curriculum_cfg = getattr(obstacle_cfg, 'curriculum', None)
+            speed_range = getattr(obstacle_cfg, 'speed_range', None)
+            speed_start = getattr(curriculum_cfg, 'speed_start', None)
+            estimator_checkpoint = (
+                getattr(safety_cfg, 'estimator_checkpoint', '')
+                if safety_cfg is not None else ''
+            )
+            if estimator_checkpoint:
+                estimator_checkpoint = os.path.expanduser(estimator_checkpoint)
+                if not os.path.isabs(estimator_checkpoint):
+                    estimator_checkpoint = os.path.abspath(os.path.join(
+                        os.path.dirname(__file__), '../../../..', estimator_checkpoint
+                    ))
+            experiment_config = {
+                'task': name,
+                'run_name': train_cfg.runner.run_name,
+                'safety_mode': getattr(safety_cfg, 'mode', 'original'),
+                'initial_policy_checkpoint': init_policy_path,
+                'resume_checkpoint': loaded_resume_path,
+                'weights_only_initialization': bool(init_policy_path),
+                'optimizer_initialization': (
+                    'fresh' if init_policy_path else
+                    ('loaded' if loaded_resume_path else 'fresh')
+                ),
+                'estimator_checkpoint': estimator_checkpoint,
+                'calibration_delta': float(
+                    getattr(safety_cfg, 'calibration_delta', 0.0)
+                    if safety_cfg is not None else 0.0
+                ),
+                'seed': int(train_cfg.seed),
+                'num_envs': int(env.num_envs),
+                'num_steps_per_env': int(train_cfg.runner.num_steps_per_env),
+                'max_iterations': int(train_cfg.runner.max_iterations),
+                'curriculum': {
+                    'enabled': bool(getattr(curriculum_cfg, 'enabled', False)),
+                    'speed_start': list(speed_start) if speed_start is not None else None,
+                    'speed_final': list(speed_range) if speed_range is not None else None,
+                    'speed_steps': int(getattr(curriculum_cfg, 'speed_steps', 0)),
+                },
+                'algorithm': class_to_dict(train_cfg.algorithm),
+                'policy': class_to_dict(train_cfg.policy),
+                'runner': class_to_dict(train_cfg.runner),
+                'reward': class_to_dict(env.cfg.rewards),
+            }
+            with open(os.path.join(log_dir, 'config.json'), 'w') as config_file:
+                json.dump(experiment_config, config_file, indent=2, sort_keys=True)
+            print('[task_registry] wrote experiment config: {}'.format(
+                os.path.join(log_dir, 'config.json')
+            ), flush=True)
         return runner, train_cfg
 
 # make global task registry

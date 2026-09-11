@@ -153,6 +153,14 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
             env_cfg.env.num_envs = args.num_envs
         if args.seed is not None:
             env_cfg.seed = args.seed
+        safety_cfg = getattr(getattr(env_cfg, 'env', None), 'predictive_safety', None)
+        if safety_cfg is not None:
+            if getattr(args, 'safety_mode', None) is not None:
+                safety_cfg.mode = args.safety_mode
+            if getattr(args, 'estimator_checkpoint', None) is not None:
+                safety_cfg.estimator_checkpoint = args.estimator_checkpoint
+            if getattr(args, 'calibration_delta', None) is not None:
+                safety_cfg.calibration_delta = args.calibration_delta
     if cfg_train is not None:
         if args.seed is not None:
             cfg_train.seed = args.seed
@@ -177,6 +185,10 @@ def get_args():
         {"name": "--task", "type": str, "default": "go2_pos_rough", "help": "Resume training or start testing from a checkpoint. Overrides config file if provided."},
         {"name": "--resume", "action": "store_true", "default": False,  "help": "Resume training from a checkpoint"},
         {"name": "--pretrained_path", "type": str, "default": None, "help": "Load Actor-Critic weights from a checkpoint before fine-tuning. Optimizer state and iteration are reset."},
+        {"name": "--init_policy_path", "type": str, "default": None, "help": "Weights-only Phase-2 initialization. Starts with a fresh PPO optimizer at iteration 0."},
+        {"name": "--safety_mode", "type": str, "default": None, "help": "Safety mode: original, synchronized_static, or predictive."},
+        {"name": "--estimator_checkpoint", "type": str, "default": None, "help": "Frozen MotionEstimator checkpoint for predictive mode."},
+        {"name": "--calibration_delta", "type": float, "default": None, "help": "Optional physical drift calibration; predictive pilot requires 0.0."},
         {"name": "--experiment_name", "type": str,  "help": "Name of the experiment to run or load. Overrides config file if provided."},
         {"name": "--run_name", "type": str,  "help": "Name of the run. Overrides config file if provided."},
         {"name": "--load_run", "type": str,  "help": "Name of the run to load when resume=True. If -1: will load the last run. Overrides config file if provided."},

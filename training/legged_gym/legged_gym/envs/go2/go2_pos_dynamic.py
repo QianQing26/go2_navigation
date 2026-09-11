@@ -7,6 +7,7 @@ from isaacgym import gymapi, gymtorch
 from isaacgym.torch_utils import quat_rotate_inverse
 
 from legged_gym.envs.base.legged_robot_pos import LeggedRobotPos
+from rsl_rl.utils.phase2 import curriculum_speed_range
 
 
 class DynamicObstacleGo2Pos(LeggedRobotPos):
@@ -168,6 +169,9 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
             self.rays, float(self.cfg.sensors.ray2d.max_dist)
         )
         self.closing_rate_gt = torch.zeros_like(self.rays)
+        self.lse_drift_gt = torch.zeros(
+            self.num_envs, 1, device=self.device, dtype=torch.float
+        )
         self.closing_rate_gt_future_fused_rays = torch.full_like(
             self.rays, float(self.cfg.sensors.ray2d.max_dist)
         )
@@ -251,9 +255,46 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
             )
 
         progress = min(float(self.common_step_counter) / curriculum_steps, 1.0)
-        speed_min = start_min + progress * (final_min - start_min)
-        speed_max = start_max + progress * (final_max - start_max)
-        return speed_min, speed_max
+        return curriculum_speed_range(
+            progress, (start_min, start_max), (final_min, final_max)
+        )
+
+    def get_dynamic_obstacle_curriculum(self):
+        """Return the current shared obstacle-speed curriculum state."""
+
+        obstacle_cfg = self.cfg.dynamic_obstacles
+        curriculum_cfg = getattr(obstacle_cfg, 'curriculum', None)
+        if curriculum_cfg is None or not getattr(curriculum_cfg, 'enabled', False):
+            progress = 1.0
+            speed_min, speed_max = self._get_dynamic_obstacle_speed_range()
+            speed_steps = 0
+        else:
+            speed_steps = int(curriculum_cfg.speed_steps)
+            progress = min(float(self.common_step_counter) / speed_steps, 1.0)
+            speed_min, speed_max = self._get_dynamic_obstacle_speed_range()
+        return {
+            'progress': progress,
+            'speed_min': speed_min,
+            'speed_max': speed_max,
+            'speed_steps': speed_steps,
+        }
+
+    def get_dynamic_obstacle_speed_statistics(self):
+        """Return statistics of the active analytic trajectory velocities.
+
+        The values intentionally come from the reflected analytic trajectory,
+        not from PhysX root-state velocities.  This is the difficulty signal
+        shared by all three Phase-2 safety modes.
+        """
+
+        _, trajectory_velocity = self._compute_dynamic_obstacle_states_at_time()
+        speeds = torch.linalg.vector_norm(trajectory_velocity, dim=-1).reshape(-1)
+        return {
+            'mean': float(speeds.mean()),
+            'p50': float(torch.quantile(speeds, 0.50)),
+            'p90': float(torch.quantile(speeds, 0.90)),
+            'max': float(speeds.max()),
+        }
 
     def _get_dynamic_obstacle_speed_ranges(self, env_ids):
         """Return one sampling interval per environment.
@@ -700,6 +741,17 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         self.future_dynamic_rays = future_dynamic_rays
         self.closing_rate_gt = (current_fused - future_fused) / self.gt_horizon
         self.closing_rate_gt_future_fused_rays = future_fused
+        gt_d_safe = float(
+            getattr(getattr(self.cfg, 'motion_estimation', None), 'gt_d_safe', 0.20)
+        )
+        gt_kappa = float(
+            getattr(getattr(self.cfg, 'motion_estimation', None), 'gt_kappa', 10.0)
+        )
+        current_h = current_fused - gt_d_safe
+        future_h = future_fused - gt_d_safe
+        current_lse = -torch.logsumexp(-gt_kappa * current_h, dim=-1, keepdim=True) / gt_kappa
+        future_lse = -torch.logsumexp(-gt_kappa * future_h, dim=-1, keepdim=True) / gt_kappa
+        self.lse_drift_gt = (future_lse - current_lse) / self.gt_horizon
 
         current_source_id = torch.where(
             static_rays <= current_dynamic_rays,
@@ -892,6 +944,7 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
     def reset_idx(self, env_ids):
         super().reset_idx(env_ids)
         self.closing_rate_gt[env_ids] = 0.0
+        self.lse_drift_gt[env_ids] = 0.0
         self.closing_rate_gt_future_fused_rays[env_ids] = float(
             self.cfg.sensors.ray2d.max_dist
         )
