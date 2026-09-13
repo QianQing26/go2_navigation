@@ -109,10 +109,30 @@ class Phase2PilotTest(unittest.TestCase):
                 actor_critic=target, optimizer=target_optimizer
             )
             runner.device = 'cpu'
+            runner.env = types.SimpleNamespace(common_step_counter=123, num_envs=64)
+            runner.num_steps_per_env = 48
             runner.load(checkpoint_path, load_optimizer=True)
             self.assertEqual(runner.current_learning_iteration, 350)
             self.assertGreater(len(target_optimizer.state), 0)
+            self.assertEqual(runner.env.common_step_counter, 350 * 48)
             self.assertEqual(remaining_iterations(2000, 350), 1650)
+
+    def test_reward_metric_names_are_dynamic_and_non_mutating(self):
+        rewards_before = torch.tensor([1.0, -2.0])
+        runner = object.__new__(OnPolicyRunner)
+        runner.env = types.SimpleNamespace(episode_sums={
+            'collision': torch.zeros(2),
+            'close_obst_vel': torch.zeros(2),
+            'termination': torch.zeros(2),
+        })
+        runner.reward_metric_names = [
+            'rew_' + name for name in runner.env.episode_sums.keys()
+        ]
+        self.assertEqual(
+            runner.reward_metric_names,
+            ['rew_collision', 'rew_close_obst_vel', 'rew_termination'],
+        )
+        self.assertTrue(torch.equal(rewards_before, torch.tensor([1.0, -2.0])))
 
     def test_ab_config_differs_only_in_safety_context(self):
         # This mirrors the three CLI-generated in-memory configs: all shared

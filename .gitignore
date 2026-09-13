@@ -157,3 +157,5 @@ isaacgym/
 
 datasets/
 motion_estimator/artifacts/
+
+run_phase3_abc.sh

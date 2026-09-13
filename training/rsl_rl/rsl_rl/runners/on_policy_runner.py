@@ -147,6 +147,12 @@ class OnPolicyRunner:
         self.writer = None
         self.log_file = None
         self.metrics_file = None
+        # ``episode_sums`` is created by the environment from the exact
+        # non-zero reward scales.  Reuse that source of truth for logging so
+        # adding a metric cannot alter reward computation or its ordering.
+        self.reward_metric_names = [
+            'rew_' + name for name in self.env.episode_sums.keys()
+        ]
         if self.log_dir is not None:
             if SummaryWriter is None:
                 raise ImportError(
@@ -166,7 +172,7 @@ class OnPolicyRunner:
                         'iteration', 'timesteps', 'collection_sec', 'learning_sec',
                         'fps', 'rollout_mean_reward', 'episodes_completed',
                         'mean_episode_reward', 'mean_episode_length',
-                        'collision_reward', 'termination_reward',
+                    ] + self.reward_metric_names + [
                         'value_loss', 'surrogate_loss', 'regularization_loss',
                         'smooth_loss', 'interv_loss',
                         'intervention_frequency', 'mean_intervention_norm',
@@ -197,7 +203,21 @@ class OnPolicyRunner:
             )
         )
         _, _ = self.env.reset()
+        # ``BaseTask.reset`` performs one zero-action simulator step to build
+        # the first observation.  That initialization step is not a policy
+        # rollout step, so keep the logical curriculum clock at zero.  Resume
+        # then restores it from the checkpoint iteration below.
+        self._set_curriculum_clock(0)
         self._log('[runner] environment reset complete')
+
+    def _set_curriculum_clock(self, iteration):
+        """Set the environment's policy-step curriculum clock exactly."""
+
+        env = getattr(self, 'env', None)
+        if env is not None and hasattr(env, 'common_step_counter'):
+            env.common_step_counter = int(iteration) * int(
+                self.num_steps_per_env
+            )
 
     def _legacy_shield_rays(self, obs):
         """Reconstruct the exact physical rays from the actor observation."""
@@ -407,8 +427,9 @@ class OnPolicyRunner:
                 episodes_completed,
                 mean_episode_reward,
                 mean_episode_length,
-                mean_episode_info('rew_collision'),
-                mean_episode_info('rew_termination'),
+            ] + [
+                mean_episode_info(name) for name in self.reward_metric_names
+            ] + [
                 locs['mean_value_loss'],
                 locs['mean_surrogate_loss'],
                 locs['mean_regularization_loss'],
@@ -658,12 +679,18 @@ class OnPolicyRunner:
         self._log(log_string.rstrip())
 
     def save(self, path, infos=None, iteration=None):
+        checkpoint_iteration = (
+            self.current_learning_iteration
+            if iteration is None else int(iteration)
+        )
         torch.save({
             'model_state_dict': self.alg.actor_critic.state_dict(),
             'optimizer_state_dict': self.alg.optimizer.state_dict(),
-            'iter': (
-                self.current_learning_iteration
-                if iteration is None else int(iteration)
+            'iter': checkpoint_iteration,
+            'tot_timesteps': int(self.tot_timesteps),
+            'tot_time': float(self.tot_time),
+            'common_step_counter': (
+                int(getattr(self.env, 'common_step_counter', 0))
             ),
             'infos': infos,
             }, path)
@@ -673,8 +700,17 @@ class OnPolicyRunner:
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
         if load_optimizer:
             self.alg.optimizer.load_state_dict(loaded_dict['optimizer_state_dict'])
-        self.current_learning_iteration = loaded_dict['iter']
-        return loaded_dict['infos']
+        self.current_learning_iteration = int(loaded_dict['iter'])
+        self.tot_timesteps = int(loaded_dict.get(
+            'tot_timesteps',
+            self.current_learning_iteration * self.num_steps_per_env * self.env.num_envs,
+        ))
+        self.tot_time = float(loaded_dict.get('tot_time', 0.0))
+        # Old checkpoints do not contain environment state.  The logical
+        # policy-step formula is the compatibility fallback and is also the
+        # canonical value required for curriculum continuity.
+        self._set_curriculum_clock(self.current_learning_iteration)
+        return loaded_dict.get('infos')
 
     def load_weights(self, path):
         """Initialize policy weights while retaining a fresh PPO optimizer."""
