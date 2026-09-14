@@ -1,13 +1,21 @@
 """Shared simulator setup and state restoration for Phase-3 evaluation."""
 
+import hashlib
+import json
 import os
+import random
 import subprocess
 
+import numpy as np
 import torch
 from isaacgym import gymtorch
 from isaacgym.torch_utils import quat_rotate_inverse
 
 from rsl_rl.utils.phase2 import PHASE2_SPEED_FINAL
+from rsl_rl.utils.phase3 import scenario_ids_digest, sha256_file
+
+
+EVALUATOR_VERSION = 'phase3.fixed_cohort.evaluator.v2'
 
 
 def configure_evaluation_cfg(
@@ -43,6 +51,237 @@ def configure_evaluation_cfg(
         env_cfg.dynamic_obstacles.dataset_speed_sampling_range = list(
             PHASE2_SPEED_FINAL
         )
+
+
+def configure_deterministic_evaluation(seed):
+    """Configure deterministic host/inference settings for one evaluator.
+
+    Isaac Gym's GPU PhysX solver is not guaranteed to be bitwise
+    deterministic.  These settings remove the software-side random sources
+    first and are recorded in the manifest so a remaining simulator-level
+    divergence can be diagnosed rather than hidden.
+    """
+
+    seed = int(seed)
+    # This must be set before CUDA kernels are initialized.
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    cuda_available = bool(torch.cuda.is_available())
+    if cuda_available:
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    deterministic_algorithms = True
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except TypeError:
+        torch.use_deterministic_algorithms(True)
+    except RuntimeError:
+        deterministic_algorithms = False
+    try:
+        torch.set_float32_matmul_precision('highest')
+    except AttributeError:
+        pass
+    return {
+        'python_random_seed': seed,
+        'numpy_random_seed': seed,
+        'torch_random_seed': seed,
+        'cuda_random_seed': seed if cuda_available else None,
+        'cublas_workspace_config': os.environ['CUBLAS_WORKSPACE_CONFIG'],
+        'torch_deterministic_algorithms': deterministic_algorithms,
+        'cuda_tf32_disabled': cuda_available,
+        'cudnn_deterministic': cuda_available,
+        'cudnn_benchmark': False,
+    }
+
+
+def _json_safe(value, depth=0):
+    """Convert config/SWIG values to bounded JSON-compatible data."""
+
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, (float, np.floating)):
+        return float(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if depth > 4:
+        return repr(value)
+    if isinstance(value, torch.Tensor):
+        if value.numel() <= 64:
+            return value.detach().cpu().tolist()
+        return {
+            'dtype': str(value.dtype), 'shape': list(value.shape),
+        }
+    if isinstance(value, dict):
+        return {
+            str(key): _json_safe(item, depth + 1)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item, depth + 1) for item in value]
+    if isinstance(value, np.ndarray):
+        return _json_safe(value.tolist(), depth + 1)
+    if hasattr(value, '__fspath__'):
+        return os.fspath(value)
+    return repr(value)
+
+
+def snapshot_public_config(value):
+    """Snapshot public scalar/list attributes, including inherited cfg attrs."""
+
+    if value is None:
+        return None
+    result = {}
+    for name in sorted(set(dir(value))):
+        if name.startswith('_'):
+            continue
+        try:
+            item = getattr(value, name)
+        except Exception:
+            continue
+        if callable(item) or isinstance(item, (staticmethod, classmethod)):
+            continue
+        if isinstance(item, type):
+            result[name] = snapshot_public_config(item)
+        elif isinstance(item, (bool, int, float, str, list, tuple, dict)):
+            result[name] = _json_safe(item)
+        elif isinstance(item, (np.ndarray, np.generic, torch.Tensor)):
+            result[name] = _json_safe(item)
+    return result
+
+
+def repository_dirty():
+    """Return whether tracked repository files differ from HEAD."""
+
+    repo_root = os.path.abspath(os.path.join(
+        os.path.dirname(__file__), '../../../..'
+    ))
+    try:
+        result = subprocess.run(
+            ['git', 'status', '--porcelain'], cwd=repo_root,
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            universal_newlines=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return bool(result.stdout.strip())
+
+
+def repository_diff_sha256():
+    """Hash the tracked working-tree diff for dirty-manifest provenance."""
+
+    repo_root = os.path.abspath(os.path.join(
+        os.path.dirname(__file__), '../../../..'
+    ))
+    try:
+        result = subprocess.run(
+            ['git', 'diff', 'HEAD', '--binary'], cwd=repo_root,
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return ''
+    return hashlib.sha256(result.stdout).hexdigest()
+
+
+def build_evaluation_manifest(
+    *, args, env, env_cfg, sim_params, policy_path, estimator_checkpoint,
+    bank_path, bank_metadata, scenario_ids, num_envs, max_steps, control_dt,
+    safety_mode, deterministic_settings, headless, cbf_layer=None,
+    task_name='go2_pos_dynamic', evaluation_kind='fixed_cohort',
+    evaluator_script=None,
+):
+    """Build the shared manifest used by fixed and checkpoint-sweep paths."""
+
+    scenario_ids = [int(value) for value in scenario_ids]
+    layer = cbf_layer
+    safety_cfg = getattr(getattr(env_cfg, 'env', None), 'predictive_safety', None)
+    if layer is not None:
+        d_safe = float(layer.d_safe)
+        kappa = float(layer.kappa)
+        damping = float(layer.damping_factor)
+    else:
+        d_safe = float(getattr(safety_cfg, 'd_safe', 0.0))
+        kappa = float(getattr(safety_cfg, 'kappa', 0.0))
+        damping = float(getattr(safety_cfg, 'damping_factor', 0.0))
+
+    def cfg(name):
+        return snapshot_public_config(getattr(env_cfg, name, None))
+
+    env_args = snapshot_public_config(args)
+    sim_snapshot = snapshot_public_config(sim_params)
+    physx = getattr(sim_params, 'physx', None)
+    if physx is not None:
+        sim_snapshot['physx'] = snapshot_public_config(physx)
+    sim_dt = float(getattr(sim_params, 'dt', control_dt))
+    scenario_range = [min(scenario_ids), max(scenario_ids)] if scenario_ids else []
+    estimator_sha = (
+        sha256_file(estimator_checkpoint)
+        if estimator_checkpoint else ''
+    )
+    evaluator_path = os.path.abspath(evaluator_script or __file__)
+    manifest = {
+        'manifest_version': 1,
+        'git_commit': repository_commit(),
+        'git_dirty': repository_dirty(),
+        'git_diff_sha256': repository_diff_sha256(),
+        'evaluator_script': os.path.relpath(
+            evaluator_path,
+            os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../..')),
+        ),
+        'evaluator_script_sha256': sha256_file(evaluator_path),
+        'evaluator_version': EVALUATOR_VERSION,
+        'policy_path': os.path.abspath(policy_path),
+        'policy_sha256': sha256_file(policy_path),
+        'safety_mode': safety_mode,
+        'estimator_checkpoint': os.path.abspath(estimator_checkpoint) if estimator_checkpoint else '',
+        'estimator_sha256': estimator_sha,
+        'scenario_bank_path': os.path.abspath(bank_path),
+        'scenario_bank_file_sha256': sha256_file(bank_path),
+        'scenario_bank_hash': bank_metadata['bank_hash'],
+        'scenario_count': len(scenario_ids),
+        'scenario_id_range': scenario_range,
+        'scenario_ids_digest': scenario_ids_digest(scenario_ids),
+        'scenario_ids': scenario_ids,
+        'simulation_seed': int(env_cfg.seed),
+        'num_envs': int(num_envs),
+        'control_dt_s': float(control_dt),
+        'sim_dt_s': sim_dt,
+        'max_episode_steps': int(max_steps),
+        'timeout_s': float(max_steps) * float(control_dt),
+        'task': task_name,
+        'terrain_config': cfg('terrain'),
+        'obstacle_count': int(env.num_dynamic_obstacles),
+        'obstacle_config': cfg('dynamic_obstacles'),
+        'noise_enabled': bool(getattr(env_cfg.noise, 'add_noise', False)),
+        'noise_config': cfg('noise'),
+        'domain_randomization': cfg('domain_rand'),
+        'replay': cfg('replay'),
+        'headless': bool(headless),
+        'deterministic_inference': True,
+        'deterministic_settings': deterministic_settings,
+        'calibration_delta': float(getattr(safety_cfg, 'calibration_delta', 0.0)),
+        'd_safe': d_safe,
+        'kappa': kappa,
+        'damping': damping,
+        'simulation_parameters': sim_snapshot,
+        'environment_config': {
+            name: cfg(name) for name in (
+                'env', 'control', 'normalization', 'asset', 'init_state',
+                'commands', 'sensors', 'visualization', 'motion_estimation',
+            )
+        },
+        'isaac_gym_arguments': env_args,
+        'provenance': {
+            'evaluation_kind': evaluation_kind,
+        },
+    }
+    # Ensure this function itself never emits a non-JSON value from a SWIG
+    # parameter or a custom config object.
+    return _json_safe(manifest)
 
 
 def repository_commit():

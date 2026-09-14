@@ -15,6 +15,11 @@ from rsl_rl.utils.phase3 import (
 )
 
 
+FAILURE_OUTCOMES = (
+    'collision_failure', 'stuck_failure', 'timeout_failure', 'other_failure',
+)
+
+
 def _parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--a', required=True, help='A/original episodes.csv')
@@ -178,6 +183,37 @@ def _difficulty_rows(results):
     return rows
 
 
+def transition_highlights(transitions, num_scenarios):
+    """Return human-readable paired highlights from the transition matrix."""
+
+    def count(pair, baseline_outcome, candidate_outcome):
+        return sum(
+            int(row['baseline_outcome'] == baseline_outcome
+                and row['candidate_outcome'] == candidate_outcome)
+            * int(row['count'])
+            for row in transitions[pair]
+        )
+
+    return {
+        'A_fail_to_C_safe_success': sum(
+            count('A_to_C', outcome, 'safe_success')
+            for outcome in FAILURE_OUTCOMES
+        ),
+        'B_fail_to_C_safe_success': sum(
+            count('B_to_C', outcome, 'safe_success')
+            for outcome in FAILURE_OUTCOMES
+        ),
+        'A_safe_to_C_fail': sum(
+            count('A_to_C', 'safe_success', outcome)
+            for outcome in FAILURE_OUTCOMES
+        ),
+        'B_safe_to_C_fail': sum(
+            count('B_to_C', 'safe_success', outcome)
+            for outcome in FAILURE_OUTCOMES
+        ),
+    }
+
+
 def _write_csv(path, rows, fields):
     with open(path, 'w', newline='') as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -257,37 +293,15 @@ def compare(script_args):
          'mean_speed_mps', 'mean_robot_speed_mps'],
     )
 
-    def transition_count(pair, base_outcome, candidate_outcome):
-        return next(
-            row['count'] for row in transitions[pair]
-            if row['baseline_outcome'] == base_outcome
-            and row['candidate_outcome'] == candidate_outcome
-        )
-
     summary = {
         'scenario_bank_hash': bank_hash,
         'num_scenarios': len(canonical_ids),
         'scenario_ids_are_identical': True,
         'aggregate': aggregate,
         'paired_tests': paired_tests,
-        'transition_highlights': {
-            'A_fail_to_C_safe_success': transition_count(
-                'A_to_C', 'collision_failure', 'safe_success'
-            ) + transition_count('A_to_C', 'timeout_failure', 'safe_success')
-            + transition_count('A_to_C', 'stuck_failure', 'safe_success')
-            + transition_count('A_to_C', 'other_failure', 'safe_success'),
-            'B_fail_to_C_safe_success': transition_count(
-                'B_to_C', 'collision_failure', 'safe_success'
-            ) + transition_count('B_to_C', 'timeout_failure', 'safe_success')
-            + transition_count('B_to_C', 'stuck_failure', 'safe_success')
-            + transition_count('B_to_C', 'other_failure', 'safe_success'),
-            'A_safe_to_C_fail': len(canonical_ids) - transition_count(
-                'A_to_C', 'safe_success', 'safe_success'
-            ),
-            'B_safe_to_C_fail': len(canonical_ids) - transition_count(
-                'B_to_C', 'safe_success', 'safe_success'
-            ),
-        },
+        'transition_highlights': transition_highlights(
+            transitions, len(canonical_ids)
+        ),
         'bootstrap_seed': int(script_args.bootstrap_seed),
         'bootstrap_resamples': int(script_args.bootstrap_resamples),
         'artifacts': {

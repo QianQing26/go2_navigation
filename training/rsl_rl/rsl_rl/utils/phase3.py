@@ -39,6 +39,11 @@ DIFFICULTY_BINS = (
     ('high', 1.0, 1.5),
 )
 
+# The training job writes checkpoints every 100 iterations.  Keep this list
+# in one pure-Python module so the evaluator, sweep wrapper, tests, and report
+# all use the same pre-registered checkpoint protocol.
+CANONICAL_CHECKPOINTS = (500, 1000, 1200, 1500, 2000)
+
 
 def _canonical_metadata(metadata):
     metadata = dict(metadata)
@@ -150,6 +155,66 @@ def load_scenario_bank(path):
     metadata['bank_hash'] = actual_hash
     metadata['path'] = path
     return {'metadata': metadata, 'scenarios': scenarios, 'extras': extras}
+
+
+def sha256_file(path, chunk_size=1024 * 1024):
+    """Return a stable SHA256 for an on-disk artifact."""
+
+    path = os.path.abspath(os.path.expanduser(path))
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        while True:
+            chunk = handle.read(int(chunk_size))
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def scenario_ids_digest(scenario_ids):
+    """Hash the ordered scenario-id list used by one evaluation."""
+
+    payload = json.dumps(
+        [int(value) for value in scenario_ids],
+        separators=(',', ':'),
+    ).encode('utf-8')
+    return hashlib.sha256(payload).hexdigest()
+
+
+def parse_scenario_ids(value, num_scenarios):
+    """Parse and validate a comma-separated scenario-id selection.
+
+    ``None`` or an empty value means the complete bank.  The evaluator keeps
+    the order supplied by the caller, while duplicate and out-of-range IDs
+    are rejected because either would invalidate paired comparisons.
+    """
+
+    count = int(num_scenarios)
+    if count < 1:
+        raise ValueError('num_scenarios must be positive')
+    if value is None or str(value).strip() == '':
+        ids = list(range(count))
+    else:
+        tokens = str(value).replace(',', ' ').split()
+        if not tokens:
+            ids = list(range(count))
+        else:
+            try:
+                ids = [int(token) for token in tokens]
+            except ValueError as exc:
+                raise ValueError(
+                    'scenario IDs must be integers separated by commas'
+                ) from exc
+    if not ids:
+        raise ValueError('scenario selection must not be empty')
+    if len(set(ids)) != len(ids):
+        raise ValueError('scenario selection contains duplicate IDs')
+    invalid = [value for value in ids if value < 0 or value >= count]
+    if invalid:
+        raise ValueError(
+            'scenario IDs out of range [0, {}): {}'.format(count, invalid)
+        )
+    return ids
 
 
 def difficulty_bin(speed_mps):
@@ -282,3 +347,66 @@ def fixed_cohort_batches(num_scenarios, num_envs):
         list(range(start, start + num_envs))
         for start in range(0, num_scenarios, num_envs)
     ]
+
+
+def fixed_cohort_batches_for_indices(scenario_indices, num_envs):
+    """Batch an explicit, duplicate-free scenario selection exactly once."""
+
+    indices = [int(value) for value in scenario_indices]
+    if not indices:
+        raise ValueError('scenario selection must be non-empty')
+    if len(set(indices)) != len(indices):
+        raise ValueError('scenario selection contains duplicate IDs')
+    num_envs = int(num_envs)
+    if num_envs < 1 or len(indices) % num_envs:
+        raise ValueError(
+            'selected scenarios ({}) must be divisible by num_envs ({})'.format(
+                len(indices), num_envs
+            )
+        )
+    return [
+        indices[start:start + num_envs]
+        for start in range(0, len(indices), num_envs)
+    ]
+
+
+def diff_manifests(left, right, ignored_paths=()):
+    """Recursively compare two evaluation manifests.
+
+    Paths are dot-separated.  This intentionally compares every field by
+    default; callers may ignore provenance fields such as output directory
+    and evaluation kind when comparing fixed and sweep invocations.
+    """
+
+    ignored = set(ignored_paths)
+    differences = []
+
+    def walk(left_value, right_value, path):
+        if path in ignored:
+            return
+        if isinstance(left_value, dict) and isinstance(right_value, dict):
+            for key in sorted(set(left_value) | set(right_value)):
+                child = '{}.{}'.format(path, key) if path else str(key)
+                if key not in left_value:
+                    differences.append({'path': child, 'left': None, 'right': right_value[key]})
+                elif key not in right_value:
+                    differences.append({'path': child, 'left': left_value[key], 'right': None})
+                else:
+                    walk(left_value[key], right_value[key], child)
+            return
+        if isinstance(left_value, list) and isinstance(right_value, list):
+            if len(left_value) != len(right_value):
+                differences.append({
+                    'path': path, 'left': left_value, 'right': right_value,
+                })
+                return
+            for index, (left_item, right_item) in enumerate(zip(left_value, right_value)):
+                walk(left_item, right_item, '{}[{}]'.format(path, index))
+            return
+        if left_value != right_value:
+            differences.append({
+                'path': path, 'left': left_value, 'right': right_value,
+            })
+
+    walk(left, right, '')
+    return differences

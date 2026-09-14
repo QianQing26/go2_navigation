@@ -156,6 +156,13 @@ wandb/
 isaacgym/
 
 datasets/
+!datasets/
+datasets/*
+!datasets/phase3/
+datasets/phase3/*
+!datasets/phase3/scenario_bank_512.pt
+!datasets/phase3/scenario_bank_512.json
 motion_estimator/artifacts/
 
 run_phase3_abc.sh
+run_phase3B_repeated_eval.sh

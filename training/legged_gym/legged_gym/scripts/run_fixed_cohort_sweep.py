@@ -7,8 +7,9 @@ import os
 import subprocess
 import sys
 
+from rsl_rl.utils.phase3 import CANONICAL_CHECKPOINTS
 
-DEFAULT_CHECKPOINTS = (500, 1000, 1250, 1500, 2000)
+DEFAULT_CHECKPOINTS = CANONICAL_CHECKPOINTS
 
 
 def _parse_args():
@@ -22,6 +23,8 @@ def _parse_args():
     parser.add_argument('--num_envs', type=int, default=64)
     parser.add_argument('--max_steps_per_episode', type=int, default=3000)
     parser.add_argument('--monitor_envs', type=int, default=8)
+    parser.add_argument('--scenario_ids', default=None)
+    parser.add_argument('--diagnostic_scenario_ids', default=None)
     return parser.parse_args()
 
 
@@ -65,11 +68,18 @@ def run_sweep(script_args):
             '--num_envs', str(int(script_args.num_envs)),
             '--max_steps_per_episode', str(int(script_args.max_steps_per_episode)),
             '--monitor_envs', str(int(script_args.monitor_envs)),
+            '--evaluation_kind', 'checkpoint_sweep',
             '--output_dir', checkpoint_dir,
             '--headless',
             '--sim_device', 'cuda:0',
             '--rl_device', 'cuda:0',
         ]
+        if script_args.scenario_ids is not None:
+            command.extend(['--scenario_ids', script_args.scenario_ids])
+        if script_args.diagnostic_scenario_ids is not None:
+            command.extend([
+                '--diagnostic_scenario_ids', script_args.diagnostic_scenario_ids
+            ])
         if script_args.estimator_checkpoint:
             command.extend(['--estimator_checkpoint', os.path.abspath(os.path.expanduser(script_args.estimator_checkpoint))])
         print('[fixed-cohort-sweep] running checkpoint {}'.format(checkpoint), flush=True)

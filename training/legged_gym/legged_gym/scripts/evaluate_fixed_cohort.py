@@ -17,13 +17,19 @@ from rsl_rl.utils.phase2 import classify_terminal_outcome, snapshot_control_cont
 from rsl_rl.utils.phase3 import (
     DIFFICULTY_BINS,
     difficulty_bin,
-    fixed_cohort_batches,
+    fixed_cohort_batches_for_indices,
     load_scenario_bank,
     outcome_counts,
+    parse_scenario_ids,
     validate_fixed_cohort_rows,
 )
 
-from phase3_common import configure_evaluation_cfg, restore_scenario_batch
+from phase3_common import (
+    build_evaluation_manifest,
+    configure_deterministic_evaluation,
+    configure_evaluation_cfg,
+    restore_scenario_batch,
+)
 
 
 TASK_NAME = 'go2_pos_dynamic'
@@ -39,6 +45,15 @@ def _parse_script_args():
     parser.add_argument('--num_envs', type=int, default=64)
     parser.add_argument('--max_steps_per_episode', type=int, default=3000)
     parser.add_argument('--monitor_envs', type=int, default=8)
+    parser.add_argument(
+        '--scenario_ids', default=None,
+        help='Comma-separated scenario IDs; omitted means the complete bank.',
+    )
+    parser.add_argument(
+        '--diagnostic_scenario_ids', default=None,
+        help='Comma-separated IDs to retain detailed trajectory diagnostics for.',
+    )
+    parser.add_argument('--evaluation_kind', default='fixed_cohort')
     parser.add_argument(
         '--progress_interval_steps', type=int, default=250,
         help='Print active-env progress every N control steps.',
@@ -83,7 +98,56 @@ TIMESERIES_FIELDS = [
     'shield_rays_max', 'h_comp', 'safety_drift', 'Lgh_u', 'alpha_h',
     'residual', 'eta', 'intervention_norm', 'done', 'collision',
     'safe_success', 'timeout', 'stuck', 'other_failure', 'forced_limit',
+    'robot_xy', 'robot_yaw', 'goal_xy', 'obstacle_xy', 'obstacle_velocity',
+    'shield_rays', 'safety_drift_value', 'u_bar', 'u_s', 'alpha',
+    'Lgh_norm_sq', 'denominator', 'pre_clip_action', 'post_clip_action',
 ]
+
+
+def _json_tensor_value(value, local_id):
+    """Serialize one diagnostic vector without losing its shape."""
+
+    return json.dumps(
+        value[local_id].detach().cpu().tolist(),
+        separators=(',', ':'),
+    )
+
+
+def _yaw_from_quaternion(quaternion, local_id):
+    quat = quaternion[local_id]
+    sin_yaw = 2.0 * (quat[3] * quat[2] + quat[0] * quat[1])
+    cos_yaw = 1.0 - 2.0 * (quat[1].square() + quat[2].square())
+    return float(torch.atan2(sin_yaw, cos_yaw))
+
+
+def _snapshot_diagnostic_context(
+    env, actor_critic, layer, context, shield_rays, pre_clip_action, local_id
+):
+    """Capture the pre-step state needed to explain a trajectory divergence."""
+
+    fallback = torch.zeros(1, device=env.device, dtype=shield_rays.dtype)
+    lgh = getattr(layer, 'last_Lgh', None)
+    lgh_norm_sq = (
+        lgh.square().sum(dim=-1, keepdim=True)
+        if lgh is not None else fallback
+    )
+    damping = float(getattr(layer, 'damping_factor', 0.0))
+    obstacle_states = env.dynamic_obstacle_states
+    return {
+        'robot_xy': _json_tensor_value(env.root_states[:, :2], local_id),
+        'robot_yaw': _yaw_from_quaternion(env.root_states[:, 3:7], local_id),
+        'goal_xy': _json_tensor_value(env.position_targets[:, :2], local_id),
+        'obstacle_xy': _json_tensor_value(obstacle_states[:, :, :2], local_id),
+        'obstacle_velocity': _json_tensor_value(obstacle_states[:, :, 7:9], local_id),
+        'shield_rays': _json_tensor_value(shield_rays, local_id),
+        'safety_drift_value': float(context['safety_drift'][local_id]),
+        'u_bar': _json_tensor_value(actor_critic.u_bar, local_id),
+        'u_s': _json_tensor_value(actor_critic.u_s, local_id),
+        'alpha': _json_tensor_value(actor_critic.alpha, local_id),
+        'Lgh_norm_sq': float(lgh_norm_sq.reshape(-1)[local_id]),
+        'denominator': float(lgh_norm_sq.reshape(-1)[local_id]) + damping,
+        'pre_clip_action': _json_tensor_value(pre_clip_action, local_id),
+    }
 
 
 def _make_episode_record(
@@ -150,8 +214,18 @@ def evaluate(args, script_args):
     metadata = bank['metadata']
     scenarios = bank['scenarios']
     num_scenarios = int(metadata['num_scenarios'])
+    selected_ids = parse_scenario_ids(script_args.scenario_ids, num_scenarios)
+    selected_indices = list(selected_ids)
     num_envs = int(script_args.num_envs)
-    batches = fixed_cohort_batches(num_scenarios, num_envs)
+    batches = fixed_cohort_batches_for_indices(selected_indices, num_envs)
+    diagnostic_ids = (
+        parse_scenario_ids(script_args.diagnostic_scenario_ids, num_scenarios)
+        if script_args.diagnostic_scenario_ids is not None else
+        selected_ids[:max(0, int(script_args.monitor_envs))]
+    )
+    diagnostic_id_set = set(diagnostic_ids)
+    if not diagnostic_id_set.issubset(set(selected_ids)):
+        raise ValueError('diagnostic scenarios must be in the evaluated cohort')
     if int(metadata.get('obstacle_count', -1)) < 1:
         raise ValueError('scenario bank has no valid obstacle count')
     if script_args.max_steps_per_episode < 1:
@@ -166,6 +240,7 @@ def evaluate(args, script_args):
         )
 
     generation_seed = int(metadata['generation_seed'])
+    deterministic_settings = configure_deterministic_evaluation(generation_seed)
     env_cfg, train_cfg = task_registry.get_cfgs(name=TASK_NAME)
     configure_evaluation_cfg(
         env_cfg, train_cfg, generation_seed, num_envs,
@@ -182,7 +257,7 @@ def evaluate(args, script_args):
         print(
             '[fixed-cohort] environment ready: scenarios={}, num_envs={}, '
             'bank_hash={}'.format(
-                num_scenarios, num_envs, metadata['bank_hash']
+                len(selected_ids), num_envs, metadata['bank_hash']
             ),
             flush=True,
         )
@@ -214,9 +289,16 @@ def evaluate(args, script_args):
             )
 
         train_cfg.runner.resume = False
+        # PyTorch 2.4.1 has a CUDA advanced-indexing assertion in the
+        # framework's stochastic reset broadcast when deterministic algorithms
+        # are enabled before runner construction.  The fixed-bank evaluator
+        # never uses that reset for measured episodes, so initialize the
+        # runner first and restore the deterministic setting immediately after.
+        torch.use_deterministic_algorithms(False, warn_only=True)
         runner, _ = task_registry.make_alg_runner(
             env=env, name=TASK_NAME, args=args, train_cfg=train_cfg, log_root=None
         )
+        torch.use_deterministic_algorithms(True, warn_only=True)
         runner.load(policy_path, load_optimizer=False)
         runner.alg.actor_critic.eval()
         env.do_reset = False
@@ -266,9 +348,17 @@ def evaluate(args, script_args):
                     action = runner.alg.actor_critic.act_inference(
                         obs, safety_drift=safety_drift, shield_rays=shield_rays
                     )
+                    pre_clip_action = action.detach().clone()
                     context = snapshot_control_context(
                         env, safety_drift, shield_rays, layer
                     )
+                    diagnostics = {}
+                    for local_id in range(num_envs):
+                        if batch_indices[local_id] in diagnostic_id_set:
+                            diagnostics[local_id] = _snapshot_diagnostic_context(
+                                env, runner.alg.actor_critic, layer, context,
+                                shield_rays, pre_clip_action, local_id,
+                            )
                     action[finished] = 0.0
                     for local_id in active_before.nonzero(as_tuple=False).flatten().tolist():
                         current = stats[local_id]
@@ -314,7 +404,7 @@ def evaluate(args, script_args):
                     terminal = active_before & (natural_done | forced)
 
                     for local_id in range(num_envs):
-                        if batch_indices[local_id] >= monitor_envs:
+                        if batch_indices[local_id] not in diagnostic_id_set:
                             continue
                         if not bool(active_before[local_id]):
                             continue
@@ -347,6 +437,10 @@ def evaluate(args, script_args):
                             'other_failure': int(outcome == 'other_failure'),
                             'forced_limit': int(forced[local_id]),
                         }
+                        row.update(diagnostics[local_id])
+                        row['post_clip_action'] = _json_tensor_value(
+                            env.nav_actions_after_clip, local_id
+                        )
                         timeseries.append(row)
                         if row['collision']:
                             collision_traces.append(dict(row))
@@ -397,8 +491,10 @@ def evaluate(args, script_args):
 
         episodes.sort(key=lambda row: int(row['scenario_id']))
         by_id, bank_hash = validate_fixed_cohort_rows(episodes)
-        if set(by_id) != set(range(num_scenarios)):
-            raise RuntimeError('fixed-cohort evaluation did not cover every scenario')
+        if set(by_id) != set(selected_ids):
+            raise RuntimeError(
+                'fixed-cohort evaluation did not cover the selected scenarios'
+            )
         output_dir = script_args.output_dir
         if output_dir is None:
             stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -428,7 +524,9 @@ def evaluate(args, script_args):
             'scenario_bank': os.path.abspath(os.path.expanduser(script_args.scenario_bank)),
             'scenario_bank_hash': bank_hash,
             'scenario_bank_generation_seed': generation_seed,
-            'num_scenarios': num_scenarios,
+            'num_scenarios': len(selected_ids),
+            'scenario_ids': selected_ids,
+            'scenario_id_range': [min(selected_ids), max(selected_ids)],
             'num_envs': num_envs,
             'one_episode_per_scenario': True,
             'first_completion_bias': False,
@@ -474,15 +572,33 @@ def evaluate(args, script_args):
                 for row in episodes
             ) / max(total_samples, 1),
             'difficulty_stratified': _difficulty_report(episodes),
-            'diagnostic_scenarios': min(monitor_envs, num_scenarios),
+            'diagnostic_scenarios': diagnostic_ids,
             'artifacts': {
                 'episodes_csv': 'episodes.csv',
                 'timeseries_csv': 'timeseries.csv',
                 'collision_traces_csv': 'collision_traces.csv',
+                'evaluation_manifest': 'evaluation_manifest.json',
             },
         }
         with open(os.path.join(output_dir, 'summary.json'), 'w') as handle:
             json.dump(summary, handle, indent=2)
+        manifest = build_evaluation_manifest(
+            args=args, env=env, env_cfg=env_cfg, sim_params=env.sim_params,
+            policy_path=policy_path,
+            estimator_checkpoint=script_args.estimator_checkpoint,
+            bank_path=script_args.scenario_bank, bank_metadata=metadata,
+            scenario_ids=selected_ids, num_envs=num_envs,
+            max_steps=script_args.max_steps_per_episode, control_dt=dt,
+            safety_mode=script_args.safety_mode,
+            deterministic_settings=deterministic_settings,
+            headless=getattr(args, 'headless', True), cbf_layer=layer,
+            task_name=TASK_NAME, evaluation_kind=script_args.evaluation_kind,
+            evaluator_script=__file__,
+        )
+        with open(
+            os.path.join(output_dir, 'evaluation_manifest.json'), 'w'
+        ) as handle:
+            json.dump(manifest, handle, indent=2, sort_keys=True)
         print(json.dumps(summary, indent=2), flush=True)
         return summary
     finally:

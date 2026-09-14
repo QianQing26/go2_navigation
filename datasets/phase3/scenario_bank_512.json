@@ -1,0 +1,22 @@
+{
+  "artifact": "scenario_bank_512.pt",
+  "bank_hash": "466b093b1b7698d322047c29d3bc81e61fb84e427d2d755a8e95f56d00fa8bee",
+  "file_sha256": "a4885ff3c02aea7cfeda981ce5584694592290830fe9fa7d13808d124fd75ef4",
+  "generation_seed": 20260911,
+  "num_scenarios": 512,
+  "obstacle_count": 6,
+  "obstacle_speed_range_mps": [0.1, 1.5],
+  "difficulty_bins": {
+    "low": "[0.1, 0.5)",
+    "medium": "[0.5, 1.0)",
+    "high": "[1.0, 1.5]"
+  },
+  "difficulty_distribution": {
+    "low": 171,
+    "medium": 171,
+    "high": 170
+  },
+  "difficulty_scalar": "vmax_scenario = max_j ||v_j||",
+  "generation_commit": "ec932f3a17a0e150a7b163adc304988d1b48cce6",
+  "generation_command": "CUDA_VISIBLE_DEVICES=0 python training/legged_gym/legged_gym/scripts/generate_predictive_cbf_scenarios.py --output datasets/phase3/scenario_bank_512.pt --num_scenarios 512 --generation_seed 20260911 --headless --sim_device cuda:0 --rl_device cuda:0"
+}
