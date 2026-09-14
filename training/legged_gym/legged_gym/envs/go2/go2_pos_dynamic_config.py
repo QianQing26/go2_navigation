@@ -1,6 +1,7 @@
 """Configuration for the isolated dynamic-obstacle Go2 task."""
 
 from .go2_pos_config import Go2PosRoughCfg, Go2PosRoughCfgPPO
+from rsl_rl.modules.cbf_lse_layer import DEFAULT_D_SAFE, DEFAULT_KAPPA
 from rsl_rl.utils.phase2 import (
     PHASE2_SPEED_FINAL,
     PHASE2_SPEED_START,
@@ -53,8 +54,10 @@ class Go2PosDynamicCfg(Go2PosRoughCfg):
     class motion_estimation:
         # Counterfactual horizon aligned with the 10 Hz exteroception rate.
         gt_horizon = 0.1
-        gt_d_safe = 0.20
-        gt_kappa = 10.0
+        # Keep the legacy metadata fields, but source them from the live CBF
+        # constants so the GT and deployed shield cannot silently diverge.
+        gt_d_safe = DEFAULT_D_SAFE
+        gt_kappa = DEFAULT_KAPPA
 
     class replay(Go2PosRoughCfg.replay):
         # The existing replay buffer stores only robot state, not obstacle

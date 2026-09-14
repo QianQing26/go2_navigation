@@ -7,7 +7,9 @@ from isaacgym import gymapi, gymtorch
 from isaacgym.torch_utils import quat_rotate_inverse
 
 from legged_gym.envs.base.legged_robot_pos import LeggedRobotPos
+from rsl_rl.modules.cbf_lse_layer import DEFAULT_D_SAFE, DEFAULT_KAPPA
 from rsl_rl.utils.phase2 import curriculum_speed_range
+from rsl_rl.utils.phase4 import lse_drift_from_fused_rays
 
 
 class DynamicObstacleGo2Pos(LeggedRobotPos):
@@ -214,6 +216,24 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         )
         if self.gt_horizon <= 0.0:
             raise ValueError('motion_estimation.gt_horizon must be positive')
+        configured_d_safe = float(
+            getattr(motion_estimation_cfg, 'gt_d_safe', DEFAULT_D_SAFE)
+        )
+        configured_kappa = float(
+            getattr(motion_estimation_cfg, 'gt_kappa', DEFAULT_KAPPA)
+        )
+        if abs(configured_d_safe - DEFAULT_D_SAFE) > 1.0e-6:
+            raise ValueError(
+                'motion_estimation.gt_d_safe must match the live CBF d_safe '
+                '({:.6f}); got {:.6f}'.format(DEFAULT_D_SAFE, configured_d_safe)
+            )
+        if abs(configured_kappa - DEFAULT_KAPPA) > 1.0e-6:
+            raise ValueError(
+                'motion_estimation.gt_kappa must match the live CBF kappa '
+                '({:.6f}); got {:.6f}'.format(DEFAULT_KAPPA, configured_kappa)
+            )
+        self.gt_d_safe = DEFAULT_D_SAFE
+        self.gt_kappa = DEFAULT_KAPPA
 
         self._reset_dynamic_obstacles(
             torch.arange(self.num_envs, device=self.device, dtype=torch.long)
@@ -723,14 +743,24 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
         )
         return dynamic_rays, hit_mask, active_obstacle_id
 
-    def _update_closing_rate_gt(
-        self, static_rays, current_dynamic_rays, current_active_obstacle_id
-    ):
-        """Build fused finite-horizon dynamic-only boundary closing labels."""
+    def compute_lse_drift_gt(self, horizon):
+        """Query the frozen-robot LSE barrier drift at an arbitrary horizon.
+
+        The current static ray field is held fixed while only the analytic
+        dynamic obstacles are advanced.  This is the same counterfactual
+        semantics used by the existing ``lse_drift_gt`` label and is kept
+        stateless so evaluation-only oracle variants cannot affect the live
+        trajectory.
+        """
+
+        horizon = float(horizon)
+        if horizon <= 0.0:
+            raise ValueError('GT horizon must be positive')
+        static_rays = self.static_rays
+        current_dynamic_rays = self.dynamic_rays
         current_fused = torch.minimum(static_rays, current_dynamic_rays)
-        _, current_trajectory_velocity = self._compute_dynamic_obstacle_states_at_time()
         future_position, _ = self._compute_dynamic_obstacle_states_at_time(
-            query_time=self.dynamic_obstacle_time + self.gt_horizon
+            query_time=self.dynamic_obstacle_time + horizon
         )
         future_dynamic_rays, _, future_active_obstacle_id = (
             self._compute_dynamic_rays_from_positions(
@@ -738,20 +768,41 @@ class DynamicObstacleGo2Pos(LeggedRobotPos):
             )
         )
         future_fused = torch.minimum(static_rays, future_dynamic_rays)
+        current_h = current_fused - self.gt_d_safe
+        future_h = future_fused - self.gt_d_safe
+        current_lse = -torch.logsumexp(
+            -self.gt_kappa * current_h, dim=-1, keepdim=True
+        ) / self.gt_kappa
+        future_lse = -torch.logsumexp(
+            -self.gt_kappa * future_h, dim=-1, keepdim=True
+        ) / self.gt_kappa
+        return {
+            'drift': lse_drift_from_fused_rays(
+                current_fused, future_fused, horizon,
+                self.gt_d_safe, self.gt_kappa,
+            ),
+            'current_fused_rays': current_fused,
+            'future_fused_rays': future_fused,
+            'future_dynamic_rays': future_dynamic_rays,
+            'future_active_obstacle_id': future_active_obstacle_id,
+            'current_lse': current_lse,
+            'future_lse': future_lse,
+        }
+
+    def _update_closing_rate_gt(
+        self, static_rays, current_dynamic_rays, current_active_obstacle_id
+    ):
+        """Build the existing configured-horizon GT labels."""
+        gt = self.compute_lse_drift_gt(self.gt_horizon)
+        current_fused = gt['current_fused_rays']
+        future_dynamic_rays = gt['future_dynamic_rays']
+        future_fused = gt['future_fused_rays']
+        future_active_obstacle_id = gt['future_active_obstacle_id']
+        _, current_trajectory_velocity = self._compute_dynamic_obstacle_states_at_time()
         self.future_dynamic_rays = future_dynamic_rays
         self.closing_rate_gt = (current_fused - future_fused) / self.gt_horizon
         self.closing_rate_gt_future_fused_rays = future_fused
-        gt_d_safe = float(
-            getattr(getattr(self.cfg, 'motion_estimation', None), 'gt_d_safe', 0.20)
-        )
-        gt_kappa = float(
-            getattr(getattr(self.cfg, 'motion_estimation', None), 'gt_kappa', 10.0)
-        )
-        current_h = current_fused - gt_d_safe
-        future_h = future_fused - gt_d_safe
-        current_lse = -torch.logsumexp(-gt_kappa * current_h, dim=-1, keepdim=True) / gt_kappa
-        future_lse = -torch.logsumexp(-gt_kappa * future_h, dim=-1, keepdim=True) / gt_kappa
-        self.lse_drift_gt = (future_lse - current_lse) / self.gt_horizon
+        self.lse_drift_gt = gt['drift']
 
         current_source_id = torch.where(
             static_rays <= current_dynamic_rays,
