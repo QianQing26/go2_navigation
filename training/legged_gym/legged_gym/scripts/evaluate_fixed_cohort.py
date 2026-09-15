@@ -42,6 +42,14 @@ def _parse_script_args():
     parser.add_argument('--scenario_bank', required=True)
     parser.add_argument('--safety_mode', choices=sorted(MODES), required=True)
     parser.add_argument('--estimator_checkpoint', default='')
+    parser.add_argument(
+        '--controller_noise', choices=('on', 'off'), default='on',
+        help=(
+            'Evaluation-only RoboGauge observation-noise override. The default '
+            '"on" preserves the historical fixed-cohort protocol; "off" sets '
+            'controller.add_noise=False and controller.noise_level=0.'
+        ),
+    )
     parser.add_argument('--num_envs', type=int, default=64)
     parser.add_argument('--max_steps_per_episode', type=int, default=3000)
     parser.add_argument('--monitor_envs', type=int, default=8)
@@ -247,6 +255,16 @@ def evaluate(args, script_args):
         safety_mode=script_args.safety_mode,
         estimator_checkpoint=script_args.estimator_checkpoint,
     )
+    # This is deliberately an evaluator-local override.  The training config
+    # default remains unchanged so the test can compare the historical
+    # controller-noise protocol against a noise-free fixed-cohort protocol.
+    if not hasattr(env_cfg, 'controller'):
+        raise AttributeError('evaluation config has no controller section')
+    if script_args.controller_noise == 'off':
+        env_cfg.controller.add_noise = False
+        env_cfg.controller.noise_level = 0.0
+    else:
+        env_cfg.controller.add_noise = True
     args.task = TASK_NAME
     args.num_envs = num_envs
     args.seed = generation_seed
@@ -519,6 +537,12 @@ def evaluate(args, script_args):
             'task': TASK_NAME,
             'policy_path': policy_path,
             'safety_mode': script_args.safety_mode,
+            'controller_noise_enabled': bool(
+                getattr(env_cfg.controller, 'add_noise', False)
+            ),
+            'controller_noise_level': float(
+                getattr(env_cfg.controller, 'noise_level', 0.0)
+            ),
             'estimator_checkpoint': script_args.estimator_checkpoint,
             'calibration_delta': 0.0,
             'scenario_bank': os.path.abspath(os.path.expanduser(script_args.scenario_bank)),
@@ -595,6 +619,32 @@ def evaluate(args, script_args):
             task_name=TASK_NAME, evaluation_kind=script_args.evaluation_kind,
             evaluator_script=__file__,
         )
+        manifest.update({
+            'controller_noise_enabled': bool(
+                getattr(env_cfg.controller, 'add_noise', False)
+            ),
+            'controller_noise_level': float(
+                getattr(env_cfg.controller, 'noise_level', 0.0)
+            ),
+            'controller_noise_protocol': script_args.controller_noise,
+            'observation_noise_enabled': bool(
+                getattr(env_cfg.noise, 'add_noise', False)
+            ),
+            'friction_randomization_enabled': bool(
+                getattr(env_cfg.domain_rand, 'randomize_friction', False)
+            ),
+            'mass_randomization_enabled': bool(
+                getattr(env_cfg.domain_rand, 'randomize_base_mass', False)
+            ),
+            'push_enabled': bool(
+                getattr(env_cfg.domain_rand, 'push_robots', False)
+            ),
+            'domain_randomization_enabled': any((
+                bool(getattr(env_cfg.domain_rand, 'randomize_friction', False)),
+                bool(getattr(env_cfg.domain_rand, 'randomize_base_mass', False)),
+                bool(getattr(env_cfg.domain_rand, 'push_robots', False)),
+            )),
+        })
         with open(
             os.path.join(output_dir, 'evaluation_manifest.json'), 'w'
         ) as handle:
