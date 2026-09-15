@@ -15,6 +15,23 @@ MODES = (
     'predictive_learned', 'oracle_gt_0p1', 'oracle_gt_0p2',
     'oracle_gt_0p3', 'oracle_gt_0p5', 'oracle_gt_multi',
 )
+TAXONOMY_LABELS = (
+    'F1_estimator_decision_miss',
+    'F2_estimator_magnitude_underestimate',
+    'F3_short_horizon',
+    'F4_execution_control_authority',
+    'F5_geometry_or_residual',
+)
+FAILURE_METRIC_FIELDS = (
+    'false_safe_fraction', 'mean_abs_drift_error', 'max_abs_drift_error',
+    'dangerous_drift_mae', 'optimistic_danger_mean', 'optimistic_danger_max',
+    'learned_detection_delay_s', 'mean_oracle_extra_intervention_0p1',
+    'max_oracle_extra_intervention_0p1', 'clip_fraction', 'max_clip_delta',
+    'mean_tracking_error', 'max_tracking_error',
+    'mean_robot_speed_pre_collision', 'min_obstacle_distance',
+    'warning_time_0p1', 'warning_time_0p2', 'warning_time_0p3',
+    'warning_time_0p5',
+)
 
 
 def _read_json(path):
@@ -162,7 +179,7 @@ def _aggregate_difficulty(rows):
 
 def _failure_rows(failure_root):
     rows = []
-    taxonomy = {}
+    taxonomy = {label: 0 for label in TAXONOMY_LABELS}
     for seed in SEEDS:
         seed_root = os.path.join(failure_root, 'seed{}'.format(seed))
         summary_path = os.path.join(seed_root, 'collision_episode_summary.csv')
@@ -174,6 +191,13 @@ def _failure_rows(failure_root):
                 for tag in json.loads(row.get('failure_tags', '[]')):
                     taxonomy[tag] = taxonomy.get(tag, 0) + 1
     return rows, taxonomy
+
+
+def _failure_continuous_metrics(rows):
+    return {
+        field: aggregate_numeric(rows, field)
+        for field in FAILURE_METRIC_FIELDS
+    }
 
 
 def _bottleneck_level(estimator_headroom, horizon_headroom, control_signal, geometry_signal):
@@ -244,6 +268,7 @@ def analyze(oracle_root, failure_root, output_dir, phase3_root=None):
     )
 
     failure_rows, taxonomy = _failure_rows(failure_root)
+    failure_continuous_metrics = _failure_continuous_metrics(failure_rows)
     learned_rates = []
     gt_rates = []
     for seed in SEEDS:
@@ -267,6 +292,13 @@ def analyze(oracle_root, failure_root, output_dir, phase3_root=None):
         'validated_training_seeds': list(SEEDS),
         'failure_analysis_collision_count': len(failure_rows),
         'taxonomy_counts': taxonomy,
+        'taxonomy_fraction_of_collisions': {
+            label: (count / len(failure_rows) if failure_rows else float('nan'))
+            for label, count in taxonomy.items()
+        },
+        'failure_continuous_metrics': failure_continuous_metrics,
+        'oracle_matrix_records': len(records),
+        'oracle_matrix_expected_records': len(SEEDS) * len(MODES) * 3,
         'learned_mean': {'safe_success_rate': learned_sr, 'collision_rate': learned_cr},
         'oracle_gt_0p1_mean': {'safe_success_rate': gt_sr, 'collision_rate': gt_cr},
         'oracle_gt_multi_mean': {'safe_success_rate': gt_multi_sr, 'collision_rate': gt_multi_cr},
@@ -285,6 +317,31 @@ def analyze(oracle_root, failure_root, output_dir, phase3_root=None):
     }
     with open(os.path.join(output_dir, 'failure_vs_oracle.json'), 'w') as handle:
         json.dump(failure_vs_oracle, handle, indent=2, sort_keys=True, allow_nan=True)
+    _write_csv(
+        os.path.join(output_dir, 'failure_taxonomy_counts.csv'),
+        [
+            {
+                'label': label,
+                'count': taxonomy[label],
+                'fraction_of_collisions': (
+                    taxonomy[label] / len(failure_rows)
+                    if failure_rows else float('nan')
+                ),
+            }
+            for label in TAXONOMY_LABELS
+        ],
+        ['label', 'count', 'fraction_of_collisions'],
+    )
+    with open(os.path.join(output_dir, 'failure_analysis_summary.json'), 'w') as handle:
+        json.dump(
+            {
+                'validated_training_seeds': list(SEEDS),
+                'collision_count': len(failure_rows),
+                'taxonomy_counts': taxonomy,
+                'continuous_metrics': failure_continuous_metrics,
+            },
+            handle, indent=2, sort_keys=True, allow_nan=True,
+        )
 
     control_signal = _mean([
         float(row.get('mean_tracking_error', 0.0)) for row in failure_rows
@@ -310,6 +367,8 @@ def analyze(oracle_root, failure_root, output_dir, phase3_root=None):
         '',
         'Validated training seeds for Phase-4: **1, 2**. Seed3 is excluded because its earlier evaluation was confirmed invalid.',
         '',
+        'The study uses one fixed 512-scenario bank, frozen policies, six drift modes, and three repeats per mode and seed (36 oracle records). Learned and oracle modes share actor observations, policy weights, rays, terrain, and scenario order; oracle GT drift is refreshed at 10 Hz and zero-order-held for five 50 Hz control steps. Replay is disabled for evaluation and no oracle policy is trained.',
+        '',
         '## Oracle fixed-policy results',
         '',
         '| Seed | Mode | Safe-success mean | Collision mean | Repeats |',
@@ -328,11 +387,26 @@ def analyze(oracle_root, failure_root, output_dir, phase3_root=None):
         '',
         '- Estimator headroom (GT-0.1 vs learned): SR `{:.4f}`, CR reduction `{:.4f}`.'.format(estimator_headroom_sr, estimator_headroom_cr),
         '- Horizon headroom (GT-multi vs GT-0.1): SR `{:.4f}`, CR reduction `{:.4f}`.'.format(horizon_headroom_sr, horizon_headroom_cr),
+        '- Oracle matrix completeness: `{}/{} records`.'.format(len(records), len(SEEDS) * len(MODES) * 3),
         '- Failure taxonomy counts: `{}`.'.format(json.dumps(taxonomy, sort_keys=True)),
+        '',
+        '## Continuous pre-collision metrics',
+        '',
+        '| Metric | Mean | Std | Min | Max |',
+        '|---|---:|---:|---:|---:|',
+    ]
+    for field in FAILURE_METRIC_FIELDS:
+        metric = failure_continuous_metrics[field]
+        report_lines.append(
+            '| {} | {:.4f} | {:.4f} | {:.4f} | {:.4f} |'.format(
+                field, metric['mean'], metric['std'], metric['min'], metric['max']
+            )
+        )
+    report_lines += [
         '',
         '## Failure Attribution vs Oracle Causality',
         '',
-        'The taxonomy is retained as a non-exclusive descriptive summary. The paired oracle results, not the heuristic primary labels, determine the causal interpretation.',
+        'The taxonomy is retained as a non-exclusive descriptive summary. F4 is an execution/control signal, not proof of causality; the paired oracle results, not heuristic labels alone, determine the causal interpretation.',
         '',
         '## Bottleneck assessment',
         '',

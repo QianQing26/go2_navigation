@@ -1,0 +1,228 @@
+{
+  "cuda_visible_devices": "0",
+  "elapsed_seconds": 2553.142081975937,
+  "estimator_checkpoint": "/home/hust_hbc/codespace/SEA-Nav-Code/motion_estimator/artifacts/20260909_162237_v1_1_C/best.pt",
+  "finished_at": "2026-09-15T10:47:38.352157",
+  "max_steps_per_episode": 3000,
+  "modes": [
+    "predictive_learned",
+    "oracle_gt_0p1",
+    "oracle_gt_0p2",
+    "oracle_gt_0p3",
+    "oracle_gt_0p5",
+    "oracle_gt_multi"
+  ],
+  "num_envs": 64,
+  "records": [
+    {
+      "label": "failure_seed1",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/failure_analysis/seed1",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_predictive_learned_repeat1",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/predictive_learned/repeat1",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_predictive_learned_repeat2",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/predictive_learned/repeat2",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_predictive_learned_repeat3",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/predictive_learned/repeat3",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_oracle_gt_0p1_repeat1",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/oracle_gt_0p1/repeat1",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_oracle_gt_0p1_repeat2",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/oracle_gt_0p1/repeat2",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_oracle_gt_0p1_repeat3",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/oracle_gt_0p1/repeat3",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_oracle_gt_0p2_repeat1",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/oracle_gt_0p2/repeat1",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_oracle_gt_0p2_repeat2",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/oracle_gt_0p2/repeat2",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_oracle_gt_0p2_repeat3",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/oracle_gt_0p2/repeat3",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_oracle_gt_0p3_repeat1",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/oracle_gt_0p3/repeat1",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_oracle_gt_0p3_repeat2",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/oracle_gt_0p3/repeat2",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_oracle_gt_0p3_repeat3",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/oracle_gt_0p3/repeat3",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_oracle_gt_0p5_repeat1",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/oracle_gt_0p5/repeat1",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_oracle_gt_0p5_repeat2",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/oracle_gt_0p5/repeat2",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_oracle_gt_0p5_repeat3",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/oracle_gt_0p5/repeat3",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_oracle_gt_multi_repeat1",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/oracle_gt_multi/repeat1",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_oracle_gt_multi_repeat2",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/oracle_gt_multi/repeat2",
+      "status": "reused"
+    },
+    {
+      "label": "seed1_oracle_gt_multi_repeat3",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed1/oracle_gt_multi/repeat3",
+      "status": "reused"
+    },
+    {
+      "label": "failure_seed2",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/failure_analysis/seed2",
+      "status": "reused"
+    },
+    {
+      "label": "seed2_predictive_learned_repeat1",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/predictive_learned/repeat1",
+      "status": "reused"
+    },
+    {
+      "label": "seed2_predictive_learned_repeat2",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/predictive_learned/repeat2",
+      "status": "reused"
+    },
+    {
+      "label": "seed2_predictive_learned_repeat3",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/predictive_learned/repeat3",
+      "status": "reused"
+    },
+    {
+      "label": "seed2_oracle_gt_0p1_repeat1",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/oracle_gt_0p1/repeat1",
+      "status": "reused"
+    },
+    {
+      "label": "seed2_oracle_gt_0p1_repeat2",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/oracle_gt_0p1/repeat2",
+      "status": "reused"
+    },
+    {
+      "label": "seed2_oracle_gt_0p1_repeat3",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/oracle_gt_0p1/repeat3",
+      "status": "reused"
+    },
+    {
+      "label": "seed2_oracle_gt_0p2_repeat1",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/oracle_gt_0p2/repeat1",
+      "status": "reused"
+    },
+    {
+      "label": "seed2_oracle_gt_0p2_repeat2",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/oracle_gt_0p2/repeat2",
+      "status": "reused"
+    },
+    {
+      "label": "seed2_oracle_gt_0p2_repeat3",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/oracle_gt_0p2/repeat3",
+      "status": "reused"
+    },
+    {
+      "label": "seed2_oracle_gt_0p3_repeat1",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/oracle_gt_0p3/repeat1",
+      "status": "reused"
+    },
+    {
+      "label": "seed2_oracle_gt_0p3_repeat2",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/oracle_gt_0p3/repeat2",
+      "status": "reused"
+    },
+    {
+      "label": "seed2_oracle_gt_0p3_repeat3",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/oracle_gt_0p3/repeat3",
+      "status": "reused"
+    },
+    {
+      "elapsed_seconds": 388.5888307094574,
+      "label": "seed2_oracle_gt_0p5_repeat1",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/oracle_gt_0p5/repeat1",
+      "status": "completed"
+    },
+    {
+      "elapsed_seconds": 395.3163697719574,
+      "label": "seed2_oracle_gt_0p5_repeat2",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/oracle_gt_0p5/repeat2",
+      "status": "completed"
+    },
+    {
+      "elapsed_seconds": 407.6628270149231,
+      "label": "seed2_oracle_gt_0p5_repeat3",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/oracle_gt_0p5/repeat3",
+      "status": "completed"
+    },
+    {
+      "elapsed_seconds": 454.5110306739807,
+      "label": "seed2_oracle_gt_multi_repeat1",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/oracle_gt_multi/repeat1",
+      "status": "completed"
+    },
+    {
+      "elapsed_seconds": 462.2173271179199,
+      "label": "seed2_oracle_gt_multi_repeat2",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/oracle_gt_multi/repeat2",
+      "status": "completed"
+    },
+    {
+      "elapsed_seconds": 444.84474086761475,
+      "label": "seed2_oracle_gt_multi_repeat3",
+      "output_dir": "/home/hust_hbc/codespace/SEA-Nav-Code/training/legged_gym/logs/go2_pos_dynamic/phase4_failure_oracle/oracle_eval/seed2/oracle_gt_multi/repeat3",
+      "status": "completed"
+    }
+  ],
+  "repeats": [
+    1,
+    2,
+    3
+  ],
+  "rl_device": "cuda:0",
+  "scenario_bank": "/home/hust_hbc/codespace/SEA-Nav-Code/datasets/phase3/scenario_bank_512.pt",
+  "serial": true,
+  "sim_device": "cuda:0",
+  "started_at": "2026-09-15T10:05:05.210086",
+  "validated_training_seeds": [
+    1,
+    2
+  ]
+}

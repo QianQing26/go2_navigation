@@ -1,0 +1,6 @@
+label,count,fraction_of_collisions
+F1_estimator_decision_miss,146,0.2530329289428076
+F2_estimator_magnitude_underestimate,277,0.4800693240901213
+F3_short_horizon,5,0.008665511265164644
+F4_execution_control_authority,577,1.0
+F5_geometry_or_residual,0,0.0
